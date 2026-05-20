@@ -155,7 +155,8 @@ async def get_style():
 
 @app.get("/app.js")
 async def get_app_js():
-    return FileResponse("app.js")
+    return FileResponse("app.js", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
 
 if __name__ == "__main__":
     # Get port from environment (e.g. for Render/Railway deployment) or default to 8000

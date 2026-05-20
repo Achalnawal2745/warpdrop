@@ -1093,7 +1093,7 @@ function startHttpFileTransfer() {
 }
 
 async function startHttpUploadLoop() {
-    const HTTP_CHUNK_SIZE = 256 * 1024; // 256KB HTTP chunks
+    const HTTP_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB HTTP chunks for faster relay speed
     let retryCount = 0;
 
     while (state.sendOffset < state.fileSize) {

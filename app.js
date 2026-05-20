@@ -504,9 +504,33 @@ async function setupPeerConnection(incomingOffer = null) {
     };
     
     state.peerConnection.onconnectionstatechange = () => {
-        logger(`WebRTC Connection State: ${state.peerConnection.connectionState}`);
-        if (state.peerConnection.connectionState === 'disconnected' || 
-            state.peerConnection.connectionState === 'failed') {
+        if (!state.peerConnection) return;
+        const connState = state.peerConnection.connectionState;
+        logger(`WebRTC Connection State: ${connState}`);
+        
+        if (connState === 'connected') {
+            // Clear any pending disconnect timer
+            if (state.disconnectTimer) {
+                clearTimeout(state.disconnectTimer);
+                state.disconnectTimer = null;
+            }
+        } else if (connState === 'disconnected') {
+            // 'disconnected' can recover — wait 5 seconds before triggering fallback
+            logger("Connection temporarily lost. Waiting 5s for recovery...");
+            state.disconnectTimer = setTimeout(() => {
+                if (state.peerConnection && state.peerConnection.connectionState !== 'connected') {
+                    if (!state.useHttpRelay) {
+                        initiateHttpRelayFallback();
+                    } else {
+                        handlePeerDisconnection("P2P connection lost.");
+                    }
+                }
+            }, 5000);
+        } else if (connState === 'failed') {
+            if (state.disconnectTimer) {
+                clearTimeout(state.disconnectTimer);
+                state.disconnectTimer = null;
+            }
             if (!state.useHttpRelay) {
                 initiateHttpRelayFallback();
             } else {

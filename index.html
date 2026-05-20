@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WarpDrop - Ultra-Fast P2P File Transfer</title>
+    <!-- Google Fonts: Inter & Space Grotesk -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- FontAwesome Icons for modern aesthetic -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Background glowing ambient blobs -->
+    <div class="ambient-blob blob-1"></div>
+    <div class="ambient-blob blob-2"></div>
+    <div class="ambient-blob blob-3"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fa-solid fa-bolt warp-icon"></i>
+                <span class="logo-text">Warp<span>Drop</span></span>
+            </div>
+            <span class="badge badge-p2p"><i class="fa-solid fa-shield-halved"></i> 100% P2P Secure</span>
+        </header>
+
+        <!-- Main Dashboard Panel -->
+        <main class="dashboard-card">
+            <!-- Connection Status Bar -->
+            <div class="connection-status-bar" id="connection-status-container">
+                <span class="status-dot status-offline" id="connection-dot"></span>
+                <span class="status-text" id="connection-text">Ready (No active transfer)</span>
+            </div>
+
+            <!-- Panel: Welcome / Initial Choices -->
+            <div class="panel-section active" id="initial-panel">
+                <div class="hero-text animate-fade-in">
+                    <h1>Transfer huge files directly.</h1>
+                    <p>No servers. No storage limits. Safe, private, and lightning fast.</p>
+                </div>
+
+                <div class="choice-cards-container">
+                    <!-- Send Card -->
+                    <div class="choice-card btn-send-mode" id="btn-send-mode">
+                        <div class="card-icon-wrapper send-icon">
+                            <i class="fa-solid fa-cloud-arrow-up"></i>
+                        </div>
+                        <h3>Send File</h3>
+                        <p>Share a file of any size (up to 50 GB+) directly from your device.</p>
+                    </div>
+
+                    <!-- Receive Card -->
+                    <div class="choice-card btn-receive-mode" id="btn-receive-mode">
+                        <div class="card-icon-wrapper receive-icon">
+                            <i class="fa-solid fa-cloud-arrow-down"></i>
+                        </div>
+                        <h3>Receive File</h3>
+                        <p>Enter a room code or link to accept an incoming stream.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel: Send Mode File Selector -->
+            <div class="panel-section" id="send-file-panel">
+                <div class="section-header">
+                    <button class="btn-back" id="btn-back-to-init-send"><i class="fa-solid fa-arrow-left"></i> Back</button>
+                    <h2>Select File to Transfer</h2>
+                </div>
+
+                <div class="drop-zone" id="drop-zone">
+                    <input type="file" id="file-input" class="file-input" />
+                    <div class="drop-zone-content">
+                        <i class="fa-solid fa-file-arrow-up drop-icon"></i>
+                        <p class="drop-text-primary">Drag & drop your file here</p>
+                        <p class="drop-text-secondary">or click to browse your files</p>
+                        <span class="file-limit-pill">Unlimited File Size</span>
+                    </div>
+                </div>
+
+                <!-- Selected File Metadata Card -->
+                <div class="file-info-card hidden" id="file-info-card">
+                    <div class="file-details">
+                        <i class="fa-regular fa-file-zipper file-type-icon" id="file-icon"></i>
+                        <div class="file-meta">
+                            <h4 id="file-name">filename.zip</h4>
+                            <p id="file-size">0.00 MB</p>
+                        </div>
+                    </div>
+                    <button class="btn-remove-file" id="btn-remove-file" title="Remove File">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+
+                <button class="btn btn-primary btn-action hidden" id="btn-generate-link">
+                    Generate Warp Link <i class="fa-solid fa-arrow-right"></i>
+                </button>
+            </div>
+
+            <!-- Panel: Share Room Link (Sender) -->
+            <div class="panel-section" id="share-link-panel">
+                <div class="section-header">
+                    <button class="btn-back" id="btn-back-to-file"><i class="fa-solid fa-arrow-left"></i> Change File</button>
+                    <h2>Waiting for Recipient</h2>
+                </div>
+
+                <div class="share-instructions animate-pulse">
+                    <p>Share this link or room code with the receiver. Keep this window open!</p>
+                </div>
+
+                <div class="warp-controls">
+                    <!-- URL Copy Field -->
+                    <div class="copy-field">
+                        <input type="text" id="share-url-input" readonly value="Generating link..." />
+                        <button class="btn-copy" id="btn-copy-url">
+                            <i class="fa-solid fa-copy"></i> Copy
+                        </button>
+                    </div>
+
+                    <div class="code-and-qr">
+                        <div class="room-code-card">
+                            <span class="label">Room Code</span>
+                            <h3 id="room-code-display">------</h3>
+                        </div>
+                        <div class="qr-container">
+                            <div class="qr-placeholder" id="qr-code-placeholder">
+                                <i class="fa-solid fa-qrcode"></i>
+                                <span>Generating QR...</span>
+                            </div>
+                            <img id="qr-code-img" class="hidden" alt="Warp QR Code" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="connection-status-panel card-nested">
+                    <i class="fa-solid fa-spinner fa-spin status-spinner"></i>
+                    <p id="waiting-status-text">Awaiting receiver connection...</p>
+                </div>
+            </div>
+
+            <!-- Panel: Enter Code / Receive Mode -->
+            <div class="panel-section" id="receive-enter-panel">
+                <div class="section-header">
+                    <button class="btn-back" id="btn-back-to-init-receive"><i class="fa-solid fa-arrow-left"></i> Back</button>
+                    <h2>Enter Warp Code</h2>
+                </div>
+
+                <div class="form-container">
+                    <p class="form-instruction">Enter the 6-digit room code to join the transfer channel.</p>
+                    <div class="code-input-wrapper">
+                        <input type="text" class="code-input" id="code-input" placeholder="000000" maxlength="6" autofocus />
+                    </div>
+                    <button class="btn btn-primary btn-action" id="btn-join-room" disabled>
+                        Connect <i class="fa-solid fa-network-wired"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Panel: Confirm & Prepare Download (Receiver) -->
+            <div class="panel-section" id="receive-confirm-panel">
+                <div class="section-header">
+                    <h2>Incoming P2P Stream</h2>
+                </div>
+
+                <div class="incoming-file-card card-nested">
+                    <div class="file-details">
+                        <i class="fa-regular fa-file-video file-type-icon large" id="rx-file-icon"></i>
+                        <div class="file-meta">
+                            <h3 id="rx-file-name">incoming_video.mp4</h3>
+                            <p id="rx-file-size">0.00 GB</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="browser-warning-box hidden" id="browser-warning">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <p>Your browser doesn't support the <strong>File System Access API</strong>. Files larger than 2 GB may crash. For massive files, we recommend Google Chrome or Microsoft Edge.</p>
+                </div>
+
+                <div class="form-actions">
+                    <button class="btn btn-secondary btn-half" id="btn-reject-transfer">Decline</button>
+                    <button class="btn btn-primary btn-half btn-icon-right" id="btn-accept-transfer">
+                        Save & Receive <i class="fa-solid fa-file-shield"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Panel: Transfer Progress (Shared) -->
+            <div class="panel-section" id="transfer-progress-panel">
+                <div class="section-header">
+                    <h2 id="transfer-title-text">Transferring...</h2>
+                </div>
+
+                <div class="stats-grid">
+                    <!-- Progress Pill -->
+                    <div class="stat-pill card-nested">
+                        <span class="stat-label">Progress</span>
+                        <span class="stat-value" id="stat-progress">0.0%</span>
+                    </div>
+                    <!-- Speed Pill -->
+                    <div class="stat-pill card-nested">
+                        <span class="stat-label">Speed</span>
+                        <span class="stat-value text-cyan" id="stat-speed">0.0 MB/s</span>
+                    </div>
+                    <!-- ETA Pill -->
+                    <div class="stat-pill card-nested">
+                        <span class="stat-label">Remaining Time</span>
+                        <span class="stat-value" id="stat-eta">Calculating...</span>
+                    </div>
+                </div>
+
+                <!-- Progress Bar container -->
+                <div class="progress-bar-wrapper">
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                    </div>
+                    <div class="progress-bar-labels">
+                        <span id="stat-bytes-counter">0.0 MB / 0.0 MB</span>
+                        <span class="status-indicator-badge" id="transfer-direction-badge">
+                            <i class="fa-solid fa-arrow-right-arrow-left"></i> Active
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Speed History Canvas Chart -->
+                <div class="chart-container card-nested">
+                    <div class="chart-header">
+                        <span>Speed History (last 60s)</span>
+                        <span class="max-speed-label" id="max-speed-label">Max: 0 MB/s</span>
+                    </div>
+                    <canvas id="speed-chart" width="500" height="120"></canvas>
+                </div>
+
+                <!-- Wake Lock Toggle (Premium detail) -->
+                <div class="wake-lock-status card-nested flex-row justify-between align-center">
+                    <div class="wake-lock-info">
+                        <h4><i class="fa-solid fa-moon text-violet"></i> Background Prevention</h4>
+                        <p class="text-xs text-muted">Keeps screen and browser awake during transfer.</p>
+                    </div>
+                    <div class="toggle-switch-wrapper">
+                        <label class="switch">
+                            <input type="checkbox" id="wake-lock-checkbox" checked>
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel: Success / Complete -->
+            <div class="panel-section" id="transfer-complete-panel">
+                <div class="success-animation-container">
+                    <div class="checkmark-circle">
+                        <div class="background"></div>
+                        <div class="checkmark draw"></div>
+                    </div>
+                </div>
+
+                <div class="hero-text text-center">
+                    <h2>Transfer Complete!</h2>
+                    <p id="complete-subtext">The file has been successfully shared directly between devices.</p>
+                </div>
+
+                <div class="complete-summary card-nested">
+                    <div class="summary-row">
+                        <span class="lbl">File Name:</span>
+                        <strong class="val" id="summary-file-name">-</strong>
+                    </div>
+                    <div class="summary-row">
+                        <span class="lbl">Total Size:</span>
+                        <strong class="val" id="summary-file-size">-</strong>
+                    </div>
+                    <div class="summary-row">
+                        <span class="lbl">Average Speed:</span>
+                        <strong class="val text-cyan" id="summary-avg-speed">-</strong>
+                    </div>
+                    <div class="summary-row">
+                        <span class="lbl">Duration:</span>
+                        <strong class="val" id="summary-duration">-</strong>
+                    </div>
+                </div>
+
+                <button class="btn btn-primary btn-action" id="btn-done">
+                    Done & Return <i class="fa-solid fa-house"></i>
+                </button>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Made with <i class="fa-solid fa-heart text-red"></i> by Antigravity | P2P technology | No tracking</p>
+        </footer>
+    </div>
+
+    <!-- P2P Client logic script -->
+    <script src="app.js"></script>
+</body>
+</html>

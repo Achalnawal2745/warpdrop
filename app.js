@@ -1093,29 +1093,61 @@ function startHttpFileTransfer() {
 }
 
 async function startHttpUploadLoop() {
-    const HTTP_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB HTTP chunks for faster relay speed
+    const HTTP_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB HTTP chunks
+    const MAX_QUEUE_SIZE = 2; // Pre-load up to 2 chunks ahead (Total 8MB in RAM)
+    const chunkQueue = [];
+    let readOffset = 0;
     let retryCount = 0;
 
+    // Background task: Aggressively read and prepare chunks into RAM ahead of time
+    async function refillQueue() {
+        while (chunkQueue.length < MAX_QUEUE_SIZE && readOffset < state.fileSize && !state.transferAborted) {
+            const currentStart = readOffset;
+            const end = Math.min(currentStart + HTTP_CHUNK_SIZE, state.fileSize);
+            const slice = state.file.slice(currentStart, end);
+            readOffset = end;
+
+            // Read the file slice into RAM asynchronously in the background
+            const promise = slice.arrayBuffer().then(buffer => ({
+                buffer: buffer,
+                offsetEnd: end
+            }));
+            
+            chunkQueue.push(promise);
+        }
+    }
+
+    // Main Transmission Loop: Grab prepared data and blast it over the network
     while (state.sendOffset < state.fileSize) {
         if (state.transferAborted) break;
 
-        const end = Math.min(state.sendOffset + HTTP_CHUNK_SIZE, state.fileSize);
-        const slice = state.file.slice(state.sendOffset, end);
+        // Keep the look-ahead pipeline filled
+        refillQueue();
+
+        // Get the oldest prepared chunk from the queue (awaits the file reading if it's still loading)
+        const currentChunkPromise = chunkQueue.shift();
+        if (!currentChunkPromise) {
+            await new Promise(r => setTimeout(r, 50)); // Safety wait if disk read is slow
+            continue;
+        }
+
+        const currentChunk = await currentChunkPromise;
 
         try {
-            const buffer = await slice.arrayBuffer();
-
             const formData = new FormData();
-            const blob = new Blob([buffer], { type: 'application/octet-stream' });
+            const blob = new Blob([currentChunk.buffer], { type: 'application/octet-stream' });
             formData.append('file', blob, state.fileName);
 
+            // Network active time — while this is uploading, refillQueue() can read the NEXT slice simultaneously!
             const response = await fetch(`/relay/upload/${state.roomID}`, {
                 method: 'POST',
                 body: formData
             });
 
             if (response.status === 408) {
-                logger("Upload chunk timeout (408), retrying chunk...");
+                logger("Upload chunk timeout (408), retrying prepared chunk...");
+                // Put the chunk back at the front of the queue to retry
+                chunkQueue.unshift(Promise.resolve(currentChunk));
                 await new Promise(r => setTimeout(r, 1000));
                 continue;
             }
@@ -1124,17 +1156,20 @@ async function startHttpUploadLoop() {
                 throw new Error(`Server returned HTTP ${response.status}`);
             }
 
-            state.sendOffset = end;
-            state.bytesTransferred = end;
+            // Move offsets and instantly update dashboard progress metrics
+            state.sendOffset = currentChunk.offsetEnd;
+            state.bytesTransferred = currentChunk.offsetEnd;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
-            retryCount = 0; // Reset retry count on successful chunk
+            retryCount = 0; 
         } catch (e) {
-            console.error("HTTP Relay Upload error:", e);
+            console.error("HTTP Relay Pipelined Upload error:", e);
             retryCount++;
             if (retryCount > 10) {
                 handlePeerDisconnection("HTTP Relay upload connection lost after multiple retries.");
                 return;
             }
+            // Put chunk back to try again
+            chunkQueue.unshift(Promise.resolve(currentChunk));
             logger(`Retrying upload (${retryCount}/10) in 1.5s...`);
             await new Promise(r => setTimeout(r, 1500));
         }
@@ -1147,6 +1182,7 @@ async function startHttpUploadLoop() {
         completeFileTransfer();
     }
 }
+
 
 async function startHttpDownloadLoop() {
     state.transferAborted = false;

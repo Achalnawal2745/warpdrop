@@ -348,6 +348,14 @@ function connectToSignalingServer() {
 
     state.ws.onopen = () => {
         updateServerStatus('online', 'Connected to Server. Waiting for peer...');
+        
+        // Start WebSocket Keep-Alive to prevent aggressive mobile network timeouts
+        state.wsKeepalive = setInterval(() => {
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 10000);
+
         if (state.role === 'receiver') {
             showPanel(el.receiveConfirmPanel);
             el.rxFileName.innerText = "Waiting for file info...";
@@ -485,12 +493,13 @@ function connectToSignalingServer() {
                 alert("Receiver declined the transfer.");
                 resetToHome();
                 break;
-
-            case 'peer-left':
-                logger("Peer disconnected.");
-                handlePeerDisconnection("The other peer disconnected.");
-                break;
         }
+    };
+
+    state.ws.onclose = () => {
+        if (state.wsKeepalive) clearInterval(state.wsKeepalive);
+        logger("Disconnected from signaling server");
+        handlePeerDisconnection("Signaling server disconnected.");
     };
 
     state.ws.onerror = (e) => {

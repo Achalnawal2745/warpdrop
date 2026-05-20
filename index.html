@@ -139,6 +139,13 @@
                     <i class="fa-solid fa-spinner fa-spin status-spinner"></i>
                     <p id="waiting-status-text">Awaiting receiver connection...</p>
                 </div>
+
+                <div class="relay-toggle-row card-nested" style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-top:8px;font-size:0.8rem;color:rgba(255,255,255,0.5);">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="force-relay-checkbox">
+                        <span><i class="fa-solid fa-server"></i> Force HTTP Relay (skip P2P — for testing)</span>
+                    </label>
+                </div>
             </div>
 
             <!-- Panel: Enter Code / Receive Mode -->

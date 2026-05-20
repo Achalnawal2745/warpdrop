@@ -412,11 +412,12 @@ function connectToSignalingServer() {
                 
             case 'peer-left':
                 logger("Peer left the room");
-                // Only disconnect if WebRTC is not yet established
-                if (!state.peerConnection || state.peerConnection.connectionState !== 'connected') {
+                // Only disconnect if WebRTC setup has not started yet.
+                // Once state.peerConnection exists, let WebRTC dictate the connection state.
+                if (!state.peerConnection) {
                     handlePeerDisconnection("Peer disconnected.");
                 } else {
-                    logger("WebRTC link is already active. Ignoring signaling peer-left.");
+                    logger("WebRTC setup is already in progress or active. Ignoring signaling peer-left.");
                 }
                 break;
                 

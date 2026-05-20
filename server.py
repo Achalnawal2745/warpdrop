@@ -111,14 +111,17 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
     try:
         while True:
-            # Receive message (SDP offers, SDP answers, ICE candidates)
-            message = await websocket.receive_text()
+            # Receive message (JSON text for signaling, bytes for file chunks)
+            message = await websocket.receive()
             
             # Broadcast the signal to the other peer in the room
             if room_id in rooms:
                 for client in rooms[room_id]:
                     if client != websocket:
-                        await client.send_text(message)
+                        if "text" in message:
+                            await client.send_text(message["text"])
+                        elif "bytes" in message:
+                            await client.send_bytes(message["bytes"])
                         
     except WebSocketDisconnect:
         logger.info(f"Client disconnected from room '{room_id}'")
@@ -145,6 +148,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 # Mount the static files
 # We can't mount "." directly as StaticFiles easily because it can override other endpoints
 # Let's serve specific files or put index.html, style.css, app.js at the root
+@app.get("/ping")
+async def ping():
+    return {"status": "alive"}
+
 @app.get("/")
 async def get_index():
     return FileResponse("index.html")

@@ -49,7 +49,7 @@ async def relay_upload(room_id: str, file: UploadFile = File(...)):
     relay["uploaded"].set()
     
     try:
-        await asyncio.wait_for(relay["downloaded"].wait(), timeout=15.0)
+        await asyncio.wait_for(relay["downloaded"].wait(), timeout=120.0)
     except asyncio.TimeoutError:
         relay["uploaded"].clear()
         raise HTTPException(status_code=408, detail="Receiver download timeout")
@@ -62,7 +62,7 @@ async def relay_download(room_id: str):
     relay = await relay_manager.get_or_create(room_id)
     
     try:
-        await asyncio.wait_for(relay["uploaded"].wait(), timeout=15.0)
+        await asyncio.wait_for(relay["uploaded"].wait(), timeout=120.0)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail="Sender upload timeout")
         

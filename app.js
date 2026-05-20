@@ -1187,39 +1187,64 @@ async function startHttpUploadLoop() {
 async function startHttpDownloadLoop() {
     state.transferAborted = false;
     let retryCount = 0;
+    const downloadQueue = [];
+    const MAX_DOWNLOAD_QUEUE = 2; // Keep up to 2 network responses buffering in RAM
 
+    // Background task to keep downloading chunks ahead of the disk writer
+    function fillDownloadQueue() {
+        let currentFetchingOffset = state.bytesTransferred + (downloadQueue.length * 4 * 1024 * 1024);
+        
+        while (downloadQueue.length < MAX_DOWNLOAD_QUEUE && currentFetchingOffset < state.fileSize && !state.transferAborted) {
+            // Kick off the network fetch asynchronously
+            const fetchPromise = fetch(`/relay/download/${state.roomID}`).then(async (response) => {
+                if (response.status === 408) return { status: 408 };
+                if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
+                
+                const arrayBuffer = await response.arrayBuffer();
+                if (arrayBuffer.byteLength === 0) throw new Error("Empty chunk received");
+                return { status: 200, buffer: arrayBuffer };
+            });
+
+            downloadQueue.push(fetchPromise);
+            currentFetchingOffset += 4 * 1024 * 1024; // Align with your 4MB chunk size
+        }
+    }
+
+    // Main Loop: Process downloaded buffers and commit them to disk
     while (state.bytesTransferred < state.fileSize) {
         if (state.transferAborted) break;
 
-        try {
-            const response = await fetch(`/relay/download/${state.roomID}`);
+        // Ensure the network download pipe stays full
+        fillDownloadQueue();
 
-            if (response.status === 408) {
-                logger("Download chunk timeout (408), retrying...");
+        const nextChunkPromise = downloadQueue.shift();
+        if (!nextChunkPromise) {
+            await new Promise(r => setTimeout(r, 50));
+            continue;
+        }
+
+        try {
+            const chunkResult = await nextChunkPromise;
+
+            if (chunkResult.status === 408) {
+                logger("Download chunk timeout (408), retrying slot...");
                 await new Promise(r => setTimeout(r, 1000));
                 continue;
             }
 
-            if (!response.ok) {
-                throw new Error(`Server returned HTTP ${response.status}`);
-            }
-
-            const arrayBuffer = await response.arrayBuffer();
-            if (arrayBuffer.byteLength === 0) {
-                throw new Error("Empty chunk received");
-            }
-
-            processIncomingChunk(arrayBuffer);
+            // Commit to disk — while the hard drive writes this, fillDownloadQueue()
+            // is already downloading the next chunk in the background!
+            processIncomingChunk(chunkResult.buffer);
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
-            retryCount = 0; // Reset retry count on successful chunk
+            retryCount = 0; 
         } catch (e) {
-            console.error("HTTP Relay Download error:", e);
+            console.error("HTTP Relay Pipelined Download error:", e);
             retryCount++;
             if (retryCount > 10) {
                 handlePeerDisconnection("HTTP Relay download connection lost after multiple retries.");
                 return;
             }
-            logger(`Retrying download (${retryCount}/10) in 1.5s...`);
+            logger(`Retrying download loop (${retryCount}/10) in 1.5s...`);
             await new Promise(r => setTimeout(r, 1500));
         }
     }

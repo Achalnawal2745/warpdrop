@@ -301,6 +301,9 @@ function resetToHome() {
         state.fileWritable = null;
     }
     
+    state.useHttpRelay = false;
+    state.transferAborted = true;
+    
     // Clear URL query params
     window.history.pushState({}, document.title, window.location.pathname);
     
@@ -377,6 +380,39 @@ function connectToSignalingServer() {
         }
         
         switch (msg.type) {
+            case 'http-relay-start':
+                logger("Received HTTP Relay start signal");
+                if (state.role === 'receiver') {
+                    state.fileName = msg.name;
+                    state.fileSize = msg.size;
+                    state.fileType = msg.mime;
+                    state.useHttpRelay = true;
+                    
+                    el.rxFileName.innerText = msg.name;
+                    el.rxFileSize.innerText = formatBytes(msg.size);
+                    el.btnAcceptTransfer.disabled = false;
+                    
+                    const extension = msg.name.split('.').pop().toLowerCase();
+                    let iconClass = 'fa-file-video';
+                    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(extension)) iconClass = 'fa-file-zipper';
+                    else if (['mp4', 'mkv', 'avi', 'mov'].includes(extension)) iconClass = 'fa-file-video';
+                    else if (['mp3', 'wav', 'flac', 'ogg'].includes(extension)) iconClass = 'fa-file-audio';
+                    else if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(extension)) iconClass = 'fa-file-image';
+                    else if (['pdf'].includes(extension)) iconClass = 'fa-file-pdf';
+                    el.rxFileIcon.className = `fa-regular ${iconClass} file-type-icon large`;
+                    
+                    el.waitingStatusText.innerText = "P2P blocked. Switched to HTTP Relay mode. Click Accept.";
+                    showPanel(el.receiveConfirmPanel);
+                }
+                break;
+                
+            case 'http-relay-ready':
+                logger("Receiver is ready for HTTP Relay. Initiating upload...");
+                if (state.role === 'sender') {
+                    startHttpFileTransfer();
+                }
+                break;
+
             case 'peer-joined':
                 logger("Peer joined the room!");
                 if (state.role === 'sender') {
@@ -471,7 +507,11 @@ async function setupPeerConnection(incomingOffer = null) {
         logger(`WebRTC Connection State: ${state.peerConnection.connectionState}`);
         if (state.peerConnection.connectionState === 'disconnected' || 
             state.peerConnection.connectionState === 'failed') {
-            handlePeerDisconnection("Direct P2P connection failed.");
+            if (!state.useHttpRelay) {
+                initiateHttpRelayFallback();
+            } else {
+                handlePeerDisconnection("Direct P2P connection failed.");
+            }
         }
     };
     
@@ -708,8 +748,13 @@ async function acceptIncomingTransfer() {
     // Keep signaling connection open during transfer to prevent peer-left triggers
     // disconnectWebSocket();
     
-    // Send ready message to sender to trigger chunk transmission
-    state.dataChannel.send(JSON.stringify({ type: 'ready' }));
+    if (state.useHttpRelay) {
+        sendSignalingMessage({ type: 'http-relay-ready' });
+        startHttpDownloadLoop();
+    } else {
+        // Send ready message to sender to trigger chunk transmission
+        state.dataChannel.send(JSON.stringify({ type: 'ready' }));
+    }
 }
 
 function processIncomingChunk(arrayBuffer) {
@@ -967,6 +1012,122 @@ function releaseWakeLock() {
             state.wakeLock = null;
             logger("Wake Lock released.");
         });
+    }
+}
+
+// HTTP Relay Fallback Operations
+function initiateHttpRelayFallback() {
+    logger("Initiating HTTP Relay fallback...");
+    state.useHttpRelay = true;
+    closePeerConnection();
+    
+    if (state.role === 'sender') {
+        el.waitingStatusText.innerText = "P2P failed. Switched to HTTP Relay fallback. Waiting for receiver...";
+        sendSignalingMessage({
+            type: 'http-relay-start',
+            name: state.fileName,
+            size: state.fileSize,
+            mime: state.fileType
+        });
+    } else {
+        el.waitingStatusText.innerText = "P2P failed. Switched to HTTP Relay fallback. Waiting for file info...";
+    }
+}
+
+function startHttpFileTransfer() {
+    state.bytesTransferred = 0;
+    state.sendOffset = 0;
+    state.isSendingPaused = false;
+    state.transferStartTime = Date.now();
+    state.lastLoggedBytes = 0;
+    state.lastSpeedTickTime = Date.now();
+    state.speedHistory = [];
+    state.maxSpeedObserved = 0;
+    state.lastUiUpdateTime = 0;
+    state.transferAborted = false;
+    
+    showPanel(el.progressPanel);
+    updateProgressPercentage(0, state.fileSize, true);
+    el.transferTitle.innerText = "Uploading File (HTTP Relay)...";
+    el.transferDirectionBadge.innerHTML = '<i class="fa-solid fa-arrow-up"></i> Sending';
+    
+    requestWakeLock();
+    startSpeedMetricsTracker();
+    
+    startHttpUploadLoop();
+}
+
+async function startHttpUploadLoop() {
+    const HTTP_CHUNK_SIZE = 256 * 1024; // 256KB HTTP chunks
+    
+    while (state.sendOffset < state.fileSize) {
+        if (state.transferAborted) break;
+        
+        const end = Math.min(state.sendOffset + HTTP_CHUNK_SIZE, state.fileSize);
+        const slice = state.file.slice(state.sendOffset, end);
+        
+        try {
+            const buffer = await slice.arrayBuffer();
+            
+            const formData = new FormData();
+            const blob = new Blob([buffer], { type: 'application/octet-stream' });
+            formData.append('file', blob, state.fileName);
+            
+            const response = await fetch(`/relay/upload/${state.roomID}`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Server returned HTTP ${response.status}`);
+            }
+            
+            state.sendOffset = end;
+            state.bytesTransferred = end;
+            updateProgressPercentage(state.bytesTransferred, state.fileSize);
+        } catch (e) {
+            console.error("HTTP Relay Upload error:", e);
+            handlePeerDisconnection("HTTP Relay upload connection lost.");
+            return;
+        }
+    }
+    
+    if (state.sendOffset >= state.fileSize) {
+        setTimeout(() => {
+            fetch(`/relay/cleanup/${state.roomID}`, { method: 'POST' }).catch(console.error);
+        }, 2000);
+        completeFileTransfer();
+    }
+}
+
+async function startHttpDownloadLoop() {
+    state.transferAborted = false;
+    
+    while (state.bytesTransferred < state.fileSize) {
+        if (state.transferAborted) break;
+        
+        try {
+            const response = await fetch(`/relay/download/${state.roomID}`);
+            if (!response.ok) {
+                throw new Error(`Server returned HTTP ${response.status}`);
+            }
+            
+            const arrayBuffer = await response.arrayBuffer();
+            if (arrayBuffer.byteLength === 0) {
+                throw new Error("Empty chunk received");
+            }
+            
+            processIncomingChunk(arrayBuffer);
+            updateProgressPercentage(state.bytesTransferred, state.fileSize);
+        } catch (e) {
+            console.error("HTTP Relay Download error:", e);
+            handlePeerDisconnection("HTTP Relay download connection lost.");
+            return;
+        }
+    }
+    
+    if (state.bytesTransferred >= state.fileSize) {
+        completeIncomingTransfer();
     }
 }
 

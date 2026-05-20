@@ -549,10 +549,16 @@ async function setupPeerConnection(incomingOffer = null) {
 
 function closePeerConnection() {
     if (state.dataChannel) {
+        state.dataChannel.onopen = null;
+        state.dataChannel.onmessage = null;
+        state.dataChannel.onclose = null;
         state.dataChannel.close();
         state.dataChannel = null;
     }
     if (state.peerConnection) {
+        state.peerConnection.onconnectionstatechange = null;
+        state.peerConnection.onicecandidate = null;
+        state.peerConnection.ondatachannel = null;
         state.peerConnection.close();
         state.peerConnection = null;
     }
@@ -1059,6 +1065,7 @@ function startHttpFileTransfer() {
 
 async function startHttpUploadLoop() {
     const HTTP_CHUNK_SIZE = 256 * 1024; // 256KB HTTP chunks
+    let retryCount = 0;
     
     while (state.sendOffset < state.fileSize) {
         if (state.transferAborted) break;
@@ -1078,6 +1085,12 @@ async function startHttpUploadLoop() {
                 body: formData
             });
             
+            if (response.status === 408) {
+                logger("Upload chunk timeout (408), retrying chunk...");
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+            }
+            
             if (!response.ok) {
                 throw new Error(`Server returned HTTP ${response.status}`);
             }
@@ -1085,10 +1098,16 @@ async function startHttpUploadLoop() {
             state.sendOffset = end;
             state.bytesTransferred = end;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
+            retryCount = 0; // Reset retry count on successful chunk
         } catch (e) {
             console.error("HTTP Relay Upload error:", e);
-            handlePeerDisconnection("HTTP Relay upload connection lost.");
-            return;
+            retryCount++;
+            if (retryCount > 10) {
+                handlePeerDisconnection("HTTP Relay upload connection lost after multiple retries.");
+                return;
+            }
+            logger(`Retrying upload (${retryCount}/10) in 1.5s...`);
+            await new Promise(r => setTimeout(r, 1500));
         }
     }
     
@@ -1102,12 +1121,20 @@ async function startHttpUploadLoop() {
 
 async function startHttpDownloadLoop() {
     state.transferAborted = false;
+    let retryCount = 0;
     
     while (state.bytesTransferred < state.fileSize) {
         if (state.transferAborted) break;
         
         try {
             const response = await fetch(`/relay/download/${state.roomID}`);
+            
+            if (response.status === 408) {
+                logger("Download chunk timeout (408), retrying...");
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+            }
+            
             if (!response.ok) {
                 throw new Error(`Server returned HTTP ${response.status}`);
             }
@@ -1119,10 +1146,16 @@ async function startHttpDownloadLoop() {
             
             processIncomingChunk(arrayBuffer);
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
+            retryCount = 0; // Reset retry count on successful chunk
         } catch (e) {
             console.error("HTTP Relay Download error:", e);
-            handlePeerDisconnection("HTTP Relay download connection lost.");
-            return;
+            retryCount++;
+            if (retryCount > 10) {
+                handlePeerDisconnection("HTTP Relay download connection lost after multiple retries.");
+                return;
+            }
+            logger(`Retrying download (${retryCount}/10) in 1.5s...`);
+            await new Promise(r => setTimeout(r, 1500));
         }
     }
     

@@ -36,7 +36,7 @@ const state = {
     wsBufferPolling: false,
     wsRelayOffset: 0,
     wsChunksInFlight: 0,       // Tracks how many blocks are currently on the wire
-    maxWsChunksInFlight: 3,    // Allowed pipeline window depth (6MB in flight max)
+    maxWsChunksInFlight: 16,   // INCREASED: Allow 16 smaller chunks in the pipeline
     wsRelayRunning: false,     // Guard: prevents concurrent streamNextWsChunk() calls
 
     // HTTP relay mode
@@ -746,7 +746,7 @@ function setupDataChannelHandlers() {
                     break;
             }
         } else {
-            processIncomingChunk(data);
+            await processIncomingChunk(data);
         }
     };
 
@@ -1452,15 +1452,15 @@ function handlePeerDisconnection(reasonText) {
 
 function startStallDetector() {
     stopStallDetector();
-    state.stallStrikes = 0;
+    state.stallStrikes         = 0;
     state.lastBytesAtStallCheck = state.bytesTransferred;
 
     state.stallDetectorInterval = setInterval(() => {
         if (state.transferAborted) { stopStallDetector(); return; }
-        if (!state.useWsRelay) { stopStallDetector(); return; }
+        if (!state.useWsRelay)     { stopStallDetector(); return; }
 
         const currentBytes = state.bytesTransferred;
-        const isMoving = currentBytes > state.lastBytesAtStallCheck;
+        const isMoving     = currentBytes > state.lastBytesAtStallCheck;
         state.lastBytesAtStallCheck = currentBytes;
 
         if (isMoving) {
@@ -1470,20 +1470,24 @@ function startStallDetector() {
 
         // Not moving
         state.stallStrikes++;
-        logger(`Stall detected (${state.stallStrikes}/8 strikes) at ${formatBytes(currentBytes)}`);
-
-        if (state.stallStrikes >= 8) {
+        
+        // Increased patience to 15 seconds for slower network connections
+        if (state.stallStrikes >= 15) {
             state.stallStrikes = 0;
 
             if (state.role === 'sender') {
-                // Kick the pipeline — release stuck lock and restart
-                logger("Stall recovery: kicking WS relay pipeline...");
-                state.wsRelayRunning = false;
-                state.wsBufferPolling = false;
-                state.wsChunksInFlight = 0;
-                streamNextWsChunk();
+                // ONLY kick if the browser has successfully sent all data to the network adapter
+                if (state.ws && state.ws.bufferedAmount === 0) {
+                    logger("Stall recovery: Socket empty, kicking WS relay pipeline...");
+                    state.wsRelayRunning   = false;
+                    state.wsBufferPolling  = false;
+                    // Safely decrement by 1 to gently poke the loop, NEVER reset to 0
+                    state.wsChunksInFlight = Math.max(0, state.wsChunksInFlight - 1);
+                    streamNextWsChunk();
+                } else {
+                    logger("Network is slow, but buffer is still draining. Waiting patiently...");
+                }
             } else if (state.role === 'receiver') {
-                // Receiver side stall — re-send ACK to unblock sender
                 logger("Stall recovery: re-sending ACK to unblock sender...");
                 sendSignalingMessage({ type: 'ws-relay-ack' });
             }

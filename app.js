@@ -36,7 +36,7 @@ const state = {
     wsBufferPolling: false,
     wsRelayOffset: 0,
     wsChunksInFlight: 0,       // Tracks how many blocks are currently on the wire
-    maxWsChunksInFlight: 3,    // Allowed pipeline window depth (3 MB in flight max)
+    maxWsChunksInFlight: 3,    // Allowed pipeline window depth (6MB in flight max)
 
     // HTTP relay mode
     useHttpRelay: false,
@@ -47,6 +47,7 @@ const state = {
     // Wake Lock
     wakeLock: null,
     relayKeepalive: null,
+    wsKeepalive: null,
 
     // UI throttling
     lastUiUpdateTime: 0
@@ -54,9 +55,9 @@ const state = {
 
 // WebRTC constants
 const CHUNK_SIZE = 64 * 1024;              // 64KB for WebRTC data channel
-const WS_CHUNK_SIZE = 1 * 1024 * 1024;     // 1MB for WebSocket relay (pipelined)
+const WS_CHUNK_SIZE = 2 * 1024 * 1024;     // 2MB for WebSocket relay (pipelined)
 const BUFFER_HIGH_WATERMARK = 4 * 1024 * 1024;
-const BUFFER_LOW_THRESHOLD  = 1 * 1024 * 1024;
+const BUFFER_LOW_THRESHOLD = 1 * 1024 * 1024;
 const ICE_CONFIG = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -67,62 +68,62 @@ const ICE_CONFIG = {
 
 // DOM Elements
 const el = {
-    dot:  document.getElementById('connection-dot'),
+    dot: document.getElementById('connection-dot'),
     text: document.getElementById('connection-text'),
 
-    initialPanel:       document.getElementById('initial-panel'),
-    sendFilePanel:      document.getElementById('send-file-panel'),
-    shareLinkPanel:     document.getElementById('share-link-panel'),
-    receiveEnterPanel:  document.getElementById('receive-enter-panel'),
-    receiveConfirmPanel:document.getElementById('receive-confirm-panel'),
-    progressPanel:      document.getElementById('transfer-progress-panel'),
-    completePanel:      document.getElementById('transfer-complete-panel'),
+    initialPanel: document.getElementById('initial-panel'),
+    sendFilePanel: document.getElementById('send-file-panel'),
+    shareLinkPanel: document.getElementById('share-link-panel'),
+    receiveEnterPanel: document.getElementById('receive-enter-panel'),
+    receiveConfirmPanel: document.getElementById('receive-confirm-panel'),
+    progressPanel: document.getElementById('transfer-progress-panel'),
+    completePanel: document.getElementById('transfer-complete-panel'),
 
-    btnSendMode:        document.getElementById('btn-send-mode'),
-    btnReceiveMode:     document.getElementById('btn-receive-mode'),
-    fileInput:          document.getElementById('file-input'),
-    dropZone:           document.getElementById('drop-zone'),
-    fileInfoCard:       document.getElementById('file-info-card'),
-    fileNameText:       document.getElementById('file-name'),
-    fileSizeText:       document.getElementById('file-size'),
-    btnRemoveFile:      document.getElementById('btn-remove-file'),
-    btnGenerateLink:    document.getElementById('btn-generate-link'),
-    shareUrlInput:      document.getElementById('share-url-input'),
-    btnCopyUrl:         document.getElementById('btn-copy-url'),
-    roomCodeDisplay:    document.getElementById('room-code-display'),
-    qrImg:              document.getElementById('qr-code-img'),
-    qrPlaceholder:      document.getElementById('qr-code-placeholder'),
-    waitingStatusText:  document.getElementById('waiting-status-text'),
-    codeInput:          document.getElementById('code-input'),
-    btnJoinRoom:        document.getElementById('btn-join-room'),
+    btnSendMode: document.getElementById('btn-send-mode'),
+    btnReceiveMode: document.getElementById('btn-receive-mode'),
+    fileInput: document.getElementById('file-input'),
+    dropZone: document.getElementById('drop-zone'),
+    fileInfoCard: document.getElementById('file-info-card'),
+    fileNameText: document.getElementById('file-name'),
+    fileSizeText: document.getElementById('file-size'),
+    btnRemoveFile: document.getElementById('btn-remove-file'),
+    btnGenerateLink: document.getElementById('btn-generate-link'),
+    shareUrlInput: document.getElementById('share-url-input'),
+    btnCopyUrl: document.getElementById('btn-copy-url'),
+    roomCodeDisplay: document.getElementById('room-code-display'),
+    qrImg: document.getElementById('qr-code-img'),
+    qrPlaceholder: document.getElementById('qr-code-placeholder'),
+    waitingStatusText: document.getElementById('waiting-status-text'),
+    codeInput: document.getElementById('code-input'),
+    btnJoinRoom: document.getElementById('btn-join-room'),
 
-    rxFileIcon:         document.getElementById('rx-file-icon'),
-    rxFileName:         document.getElementById('rx-file-name'),
-    rxFileSize:         document.getElementById('rx-file-size'),
-    browserWarning:     document.getElementById('browser-warning'),
-    btnRejectTransfer:  document.getElementById('btn-reject-transfer'),
-    btnAcceptTransfer:  document.getElementById('btn-accept-transfer'),
+    rxFileIcon: document.getElementById('rx-file-icon'),
+    rxFileName: document.getElementById('rx-file-name'),
+    rxFileSize: document.getElementById('rx-file-size'),
+    browserWarning: document.getElementById('browser-warning'),
+    btnRejectTransfer: document.getElementById('btn-reject-transfer'),
+    btnAcceptTransfer: document.getElementById('btn-accept-transfer'),
 
-    transferTitle:          document.getElementById('transfer-title-text'),
-    statProgress:           document.getElementById('stat-progress'),
-    statSpeed:              document.getElementById('stat-speed'),
-    statEta:                document.getElementById('stat-eta'),
-    progressBarFill:        document.getElementById('progress-bar-fill'),
-    statBytesCounter:       document.getElementById('stat-bytes-counter'),
+    transferTitle: document.getElementById('transfer-title-text'),
+    statProgress: document.getElementById('stat-progress'),
+    statSpeed: document.getElementById('stat-speed'),
+    statEta: document.getElementById('stat-eta'),
+    progressBarFill: document.getElementById('progress-bar-fill'),
+    statBytesCounter: document.getElementById('stat-bytes-counter'),
     transferDirectionBadge: document.getElementById('transfer-direction-badge'),
-    canvas:                 document.getElementById('speed-chart'),
-    maxSpeedLabel:          document.getElementById('max-speed-label'),
-    wakeLockCheckbox:       document.getElementById('wake-lock-checkbox'),
+    canvas: document.getElementById('speed-chart'),
+    maxSpeedLabel: document.getElementById('max-speed-label'),
+    wakeLockCheckbox: document.getElementById('wake-lock-checkbox'),
 
-    summaryFileName:  document.getElementById('summary-file-name'),
-    summaryFileSize:  document.getElementById('summary-file-size'),
-    summaryAvgSpeed:  document.getElementById('summary-avg-speed'),
-    summaryDuration:  document.getElementById('summary-duration'),
-    btnDone:          document.getElementById('btn-done'),
+    summaryFileName: document.getElementById('summary-file-name'),
+    summaryFileSize: document.getElementById('summary-file-size'),
+    summaryAvgSpeed: document.getElementById('summary-avg-speed'),
+    summaryDuration: document.getElementById('summary-duration'),
+    btnDone: document.getElementById('btn-done'),
 
     btnBackInitSend: document.getElementById('btn-back-to-init-send'),
-    btnBackFile:     document.getElementById('btn-back-to-file'),
-    btnBackInitRx:   document.getElementById('btn-back-to-init-receive')
+    btnBackFile: document.getElementById('btn-back-to-file'),
+    btnBackInitRx: document.getElementById('btn-back-to-init-receive')
 };
 
 // ─── Init ────────────────────────────────────────────────────────────────────
@@ -149,7 +150,6 @@ function checkUrlForRoom() {
         el.codeInput.value = roomParam;
         el.btnJoinRoom.disabled = false;
         showPanel(el.receiveEnterPanel);
-        // Show panel first, then auto-join so user sees what's happening
         setTimeout(() => joinRoom(), 300);
     }
 }
@@ -248,18 +248,18 @@ function updateServerStatus(status, text) {
 
 function getFileIcon(filename) {
     const ext = filename.split('.').pop().toLowerCase();
-    if (['zip','rar','7z','tar','gz'].includes(ext)) return 'fa-file-zipper';
-    if (['mp4','mkv','avi','mov'].includes(ext))     return 'fa-file-video';
-    if (['mp3','wav','flac','ogg'].includes(ext))    return 'fa-file-audio';
-    if (['png','jpg','jpeg','gif','svg','webp'].includes(ext)) return 'fa-file-image';
-    if (ext === 'pdf')                               return 'fa-file-pdf';
-    if (['txt','md','json','csv'].includes(ext))     return 'fa-file-lines';
-    if (['exe','msi','bat'].includes(ext))           return 'fa-file-code';
+    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'fa-file-zipper';
+    if (['mp4', 'mkv', 'avi', 'mov'].includes(ext)) return 'fa-file-video';
+    if (['mp3', 'wav', 'flac', 'ogg'].includes(ext)) return 'fa-file-audio';
+    if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) return 'fa-file-image';
+    if (ext === 'pdf') return 'fa-file-pdf';
+    if (['txt', 'md', 'json', 'csv'].includes(ext)) return 'fa-file-lines';
+    if (['exe', 'msi', 'bat'].includes(ext)) return 'fa-file-code';
     return 'fa-file';
 }
 
 function handleFileSelection(file) {
-    state.file     = file;
+    state.file = file;
     state.fileName = file.name;
     state.fileSize = file.size;
     state.fileType = file.type;
@@ -285,6 +285,9 @@ function resetToHome() {
     resetFileSelection();
     stopRelayKeepalive();
 
+    // FIX: clear wsKeepalive on reset (was leaking intervals)
+    if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
+
     Object.assign(state, {
         role: null, roomID: null,
         receivedChunks: [], pendingWrites: [],
@@ -294,7 +297,7 @@ function resetToHome() {
     });
 
     if (state.fileWritable) {
-        try { state.fileWritable.close(); } catch (_) {}
+        try { state.fileWritable.close(); } catch (_) { }
         state.fileWritable = null;
     }
 
@@ -342,14 +345,11 @@ function connectToSignalingServer() {
 
     const wsUrl = `${getWsProtocol()}${window.location.host}/ws/${state.roomID}`;
     state.ws = new WebSocket(wsUrl);
-
-    // Important: receive binary as ArrayBuffer, not Blob
     state.ws.binaryType = 'arraybuffer';
 
     state.ws.onopen = () => {
         updateServerStatus('online', 'Connected to Server. Waiting for peer...');
-        
-        // Start WebSocket Keep-Alive to prevent aggressive mobile network timeouts
+
         state.wsKeepalive = setInterval(() => {
             if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                 state.ws.send(JSON.stringify({ type: 'ping' }));
@@ -367,15 +367,15 @@ function connectToSignalingServer() {
     state.ws.onmessage = async (event) => {
         // ── Binary frame = file chunk in WS relay mode ──
         if (event.data instanceof ArrayBuffer) {
-            if (state.useWsRelay && state.role === 'receiver') {
+            // FIX: guard against re-entry after transfer completes
+            if (state.useWsRelay && state.role === 'receiver' && !state.transferAborted) {
                 processIncomingChunk(event.data);
                 updateProgressPercentage(state.bytesTransferred, state.fileSize);
 
-                // Send ACK so sender can pace itself
                 sendSignalingMessage({ type: 'ws-relay-ack' });
 
-                // Check if transfer complete
                 if (state.bytesTransferred >= state.fileSize) {
+                    state.transferAborted = true; // prevent double-complete
                     await completeIncomingTransfer();
                 }
             }
@@ -435,9 +435,9 @@ function connectToSignalingServer() {
             case 'ws-relay-start':
                 logger("Received WS Relay start signal");
                 if (state.role === 'receiver') {
-                    state.fileName  = msg.name;
-                    state.fileSize  = msg.size;
-                    state.fileType  = msg.mime;
+                    state.fileName = msg.name;
+                    state.fileSize = msg.size;
+                    state.fileType = msg.mime;
                     state.useWsRelay = true;
 
                     el.rxFileName.innerText = msg.name;
@@ -456,11 +456,12 @@ function connectToSignalingServer() {
 
             case 'ws-relay-ack':
                 if (state.role === 'sender' && state.useWsRelay) {
-                    state.wsChunksInFlight = Math.max(0, state.wsChunksInFlight - 1); // Decrement chunks in flight
-                    
+                    state.wsChunksInFlight = Math.max(0, state.wsChunksInFlight - 1);
+
                     if (state.wsRelayOffset >= state.fileSize && state.wsChunksInFlight === 0) {
-                        completeFileTransfer();
-                    } else if (!state.wsBufferPolling) {
+                        // FIX: guard against double-fire of completeFileTransfer
+                        if (!state.transferAborted) completeFileTransfer();
+                    } else if (!state.wsBufferPolling && state.wsRelayOffset < state.fileSize) {
                         streamNextWsChunk();
                     }
                 }
@@ -470,9 +471,9 @@ function connectToSignalingServer() {
             case 'http-relay-start':
                 logger("Received HTTP Relay start signal");
                 if (state.role === 'receiver') {
-                    state.fileName  = msg.name;
-                    state.fileSize  = msg.size;
-                    state.fileType  = msg.mime;
+                    state.fileName = msg.name;
+                    state.fileSize = msg.size;
+                    state.fileType = msg.mime;
                     state.useHttpRelay = true;
 
                     el.rxFileName.innerText = msg.name;
@@ -493,13 +494,19 @@ function connectToSignalingServer() {
                 alert("Receiver declined the transfer.");
                 resetToHome();
                 break;
-        }
-    };
 
-    state.ws.onclose = () => {
-        if (state.wsKeepalive) clearInterval(state.wsKeepalive);
-        logger("Disconnected from signaling server");
-        handlePeerDisconnection("Signaling server disconnected.");
+            // FIX: peer-left was missing — transfer would just freeze silently
+            case 'peer-left':
+                logger("Peer disconnected.");
+                if (!state.transferAborted) {
+                    handlePeerDisconnection("The other peer disconnected.");
+                }
+                break;
+
+            case 'ping':
+                // Ignore keepalive pings forwarded from peer
+                break;
+        }
     };
 
     state.ws.onerror = (e) => {
@@ -507,16 +514,22 @@ function connectToSignalingServer() {
         updateServerStatus('offline', 'Connection error.');
     };
 
+    // FIX: was defined twice — second definition silently overwrote the first,
+    // meaning wsKeepalive was never cleared and peer disconnect was never handled
     state.ws.onclose = () => {
-        logger("WebSocket closed.");
+        if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
+        logger("Disconnected from signaling server.");
+        if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize && !state.transferAborted) {
+            handlePeerDisconnection("Signaling server disconnected.");
+        }
     };
 }
 
 function disconnectWebSocket() {
     if (state.ws) {
         state.ws.onmessage = null;
-        state.ws.onclose   = null;
-        state.ws.onerror   = null;
+        state.ws.onclose = null;
+        state.ws.onerror = null;
         state.ws.close();
         state.ws = null;
     }
@@ -588,14 +601,14 @@ async function setupPeerConnection(incomingOffer = null) {
 function closePeerConnection() {
     if (state.dataChannel) {
         state.dataChannel.onopen = state.dataChannel.onmessage =
-        state.dataChannel.onclose = null;
+            state.dataChannel.onclose = null;
         state.dataChannel.close();
         state.dataChannel = null;
     }
     if (state.peerConnection) {
         state.peerConnection.onconnectionstatechange =
-        state.peerConnection.onicecandidate =
-        state.peerConnection.ondatachannel = null;
+            state.peerConnection.onicecandidate =
+            state.peerConnection.ondatachannel = null;
         state.peerConnection.close();
         state.peerConnection = null;
     }
@@ -688,13 +701,13 @@ async function streamNextChunks() {
             return;
         }
 
-        const end   = Math.min(state.sendOffset + CHUNK_SIZE, state.fileSize);
+        const end = Math.min(state.sendOffset + CHUNK_SIZE, state.fileSize);
         const slice = state.file.slice(state.sendOffset, end);
 
         try {
             const buffer = await slice.arrayBuffer();
             state.dataChannel.send(buffer);
-            state.sendOffset      = end;
+            state.sendOffset = end;
             state.bytesTransferred = end;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
         } catch (e) {
@@ -705,7 +718,6 @@ async function streamNextChunks() {
     }
 
     if (state.sendOffset >= state.fileSize && !state.isSendingPaused) {
-        // Wait for buffer to drain before sending EOF
         const waitForDrain = () => {
             if (state.dataChannel.bufferedAmount === 0) {
                 state.dataChannel.send(JSON.stringify({ type: 'eof' }));
@@ -723,7 +735,7 @@ async function streamNextChunks() {
 async function acceptIncomingTransfer() {
     if ('showSaveFilePicker' in window) {
         try {
-            state.fileHandle   = await window.showSaveFilePicker({ suggestedName: state.fileName });
+            state.fileHandle = await window.showSaveFilePicker({ suggestedName: state.fileName });
             state.fileWritable = await state.fileHandle.createWritable();
             state.pendingWrites = [];
             logger("File System Writable Stream initialized.");
@@ -761,14 +773,12 @@ async function acceptIncomingTransfer() {
 function processIncomingChunk(arrayBuffer) {
     try {
         if (state.fileWritable) {
-            // Write and track the promise so we can await all before closing
             const writePromise = state.fileWritable.write(arrayBuffer).catch(e => {
                 console.error("Write error:", e);
                 handlePeerDisconnection("Local file write failed.");
             });
             state.pendingWrites.push(writePromise);
 
-            // Keep pendingWrites from growing unboundedly — prune resolved ones periodically
             if (state.pendingWrites.length > 50) {
                 state.pendingWrites = state.pendingWrites.filter(p => {
                     let settled = false;
@@ -791,15 +801,14 @@ async function completeIncomingTransfer() {
     releaseWakeLock();
     stopRelayKeepalive();
 
-    const durationMs   = Date.now() - state.transferStartTime;
+    const durationMs = Date.now() - state.transferStartTime;
     const avgSpeedBytes = state.bytesTransferred / (durationMs / 1000);
 
     if (state.fileWritable) {
         try {
-            // Wait for ALL pending writes to finish before closing
             await Promise.all(state.pendingWrites);
             await state.fileWritable.close();
-            state.fileWritable  = null;
+            state.fileWritable = null;
             state.pendingWrites = [];
             logger("File saved and stream closed.");
         } catch (e) {
@@ -814,8 +823,8 @@ async function completeIncomingTransfer() {
             state.receivedChunks = [];
 
             const url = URL.createObjectURL(blob);
-            const a   = document.createElement('a');
-            a.href     = url;
+            const a = document.createElement('a');
+            a.href = url;
             a.download = state.fileName;
             document.body.appendChild(a);
             a.click();
@@ -852,7 +861,7 @@ function initiateWsRelayFallback() {
 
 function startWsRelayTransfer() {
     initTransferState();
-    state.wsRelayOffset  = 0;
+    state.wsRelayOffset = 0;
     state.wsBufferPolling = false;
     state.wsChunksInFlight = 0;
     showPanel(el.progressPanel);
@@ -867,13 +876,11 @@ function startWsRelayTransfer() {
 
 async function streamNextWsChunk() {
     if (state.transferAborted) return;
-    
-    // SLIDING WINDOW CONTROL: Keep streaming chunks until the pipeline window is full
+
     while (state.wsChunksInFlight < state.maxWsChunksInFlight && state.wsRelayOffset < state.fileSize) {
-        
-        // System Socket Buffer Safeguard (Flow Control)
+
         if (state.ws && state.ws.bufferedAmount > 8 * 1024 * 1024) {
-            if (state.wsBufferPolling) return; // Prevent duplicate polling loops
+            if (state.wsBufferPolling) return;
             state.wsBufferPolling = true;
             const wait = () => {
                 if (state.transferAborted) return;
@@ -891,9 +898,8 @@ async function streamNextWsChunk() {
         const currentStart = state.wsRelayOffset;
         const end = Math.min(currentStart + WS_CHUNK_SIZE, state.fileSize);
         const slice = state.file.slice(currentStart, end);
-        
-        state.wsRelayOffset = end;
-        state.wsChunksInFlight++; // Add to current network pipeline counter
+
+        state.wsRelayOffset = end; // advance offset before await to prevent re-read
 
         try {
             const buffer = await slice.arrayBuffer();
@@ -903,10 +909,11 @@ async function streamNextWsChunk() {
                 return;
             }
 
-            // Blasts chunk down the pipeline instantly without blocking!
+            // FIX: increment AFTER read completes, not before — otherwise window
+            // fills with in-progress reads and starves actual network sends
+            state.wsChunksInFlight++;
             state.ws.send(buffer);
 
-            // Fast Progress UI Refresh
             state.bytesTransferred = end;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
 
@@ -918,7 +925,7 @@ async function streamNextWsChunk() {
     }
 }
 
-// ─── HTTP Relay Fallback ────────────────────────────────────────────────────────
+// ─── HTTP Relay Fallback ──────────────────────────────────────────────────────
 
 function initiateHttpRelayFallback() {
     logger("Initiating HTTP Relay fallback...");
@@ -952,8 +959,8 @@ function startHttpFileTransfer() {
 }
 
 async function startHttpUploadLoop() {
-    const HTTP_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB HTTP chunks
-    const MAX_QUEUE_SIZE = 2; // Pre-load up to 2 chunks ahead (Total 8MB in RAM)
+    const HTTP_CHUNK_SIZE = 4 * 1024 * 1024;
+    const MAX_QUEUE_SIZE = 2;
     const chunkQueue = [];
     let readOffset = 0;
     let retryCount = 0;
@@ -996,7 +1003,7 @@ async function startHttpUploadLoop() {
             });
 
             if (response.status === 408) {
-                logger("Upload chunk timeout (408), retrying prepared chunk...");
+                logger("Upload chunk timeout (408), retrying...");
                 chunkQueue.unshift(Promise.resolve(currentChunk));
                 await new Promise(r => setTimeout(r, 1000));
                 continue;
@@ -1009,12 +1016,12 @@ async function startHttpUploadLoop() {
             state.sendOffset = currentChunk.offsetEnd;
             state.bytesTransferred = currentChunk.offsetEnd;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
-            retryCount = 0; 
+            retryCount = 0;
         } catch (e) {
-            console.error("HTTP Relay Pipelined Upload error:", e);
+            console.error("HTTP Relay Upload error:", e);
             retryCount++;
             if (retryCount > 10) {
-                handlePeerDisconnection("HTTP Relay upload connection lost after multiple retries.");
+                handlePeerDisconnection("HTTP Relay upload failed after multiple retries.");
                 return;
             }
             chunkQueue.unshift(Promise.resolve(currentChunk));
@@ -1035,23 +1042,23 @@ async function startHttpDownloadLoop() {
     state.transferAborted = false;
     let retryCount = 0;
     const downloadQueue = [];
-    const MAX_DOWNLOAD_QUEUE = 2; // Keep up to 2 network responses buffering in RAM
+    const MAX_DOWNLOAD_QUEUE = 2;
 
     function fillDownloadQueue() {
         let currentFetchingOffset = state.bytesTransferred + (downloadQueue.length * 4 * 1024 * 1024);
-        
+
         while (downloadQueue.length < MAX_DOWNLOAD_QUEUE && currentFetchingOffset < state.fileSize && !state.transferAborted) {
             const fetchPromise = fetch(`/relay/download/${state.roomID}`).then(async (response) => {
                 if (response.status === 408) return { status: 408 };
                 if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
-                
+
                 const arrayBuffer = await response.arrayBuffer();
                 if (arrayBuffer.byteLength === 0) throw new Error("Empty chunk received");
                 return { status: 200, buffer: arrayBuffer };
             });
 
             downloadQueue.push(fetchPromise);
-            currentFetchingOffset += 4 * 1024 * 1024; // Align with 4MB chunk size
+            currentFetchingOffset += 4 * 1024 * 1024;
         }
     }
 
@@ -1076,15 +1083,15 @@ async function startHttpDownloadLoop() {
 
             processIncomingChunk(chunkResult.buffer);
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
-            retryCount = 0; 
+            retryCount = 0;
         } catch (e) {
-            console.error("HTTP Relay Pipelined Download error:", e);
+            console.error("HTTP Relay Download error:", e);
             retryCount++;
             if (retryCount > 10) {
-                handlePeerDisconnection("HTTP Relay download connection lost after multiple retries.");
+                handlePeerDisconnection("HTTP Relay download failed after multiple retries.");
                 return;
             }
-            logger(`Retrying download loop (${retryCount}/10) in 1.5s...`);
+            logger(`Retrying download (${retryCount}/10) in 1.5s...`);
             await new Promise(r => setTimeout(r, 1500));
         }
     }
@@ -1102,7 +1109,7 @@ function completeFileTransfer() {
     releaseWakeLock();
     stopRelayKeepalive();
 
-    const durationMs    = Date.now() - state.transferStartTime;
+    const durationMs = Date.now() - state.transferStartTime;
     const avgSpeedBytes = state.bytesTransferred / (durationMs / 1000);
     showSuccessScreen(durationMs, avgSpeedBytes);
 }
@@ -1110,16 +1117,16 @@ function completeFileTransfer() {
 // ─── Progress & Stats UI ──────────────────────────────────────────────────────
 
 function initTransferState() {
-    state.bytesTransferred  = 0;
-    state.sendOffset        = 0;
-    state.isSendingPaused   = false;
+    state.bytesTransferred = 0;
+    state.sendOffset = 0;
+    state.isSendingPaused = false;
     state.transferStartTime = Date.now();
-    state.lastLoggedBytes   = 0;
+    state.lastLoggedBytes = 0;
     state.lastSpeedTickTime = Date.now();
-    state.speedHistory      = [];
-    state.maxSpeedObserved  = 0;
-    state.lastUiUpdateTime  = 0;
-    state.transferAborted   = false;
+    state.speedHistory = [];
+    state.maxSpeedObserved = 0;
+    state.lastUiUpdateTime = 0;
+    state.transferAborted = false;
 }
 
 function updateProgressPercentage(transferred, total, force = false) {
@@ -1128,19 +1135,19 @@ function updateProgressPercentage(transferred, total, force = false) {
     state.lastUiUpdateTime = now;
 
     const pct = ((transferred / total) * 100).toFixed(1);
-    el.statProgress.innerText     = `${pct}%`;
+    el.statProgress.innerText = `${pct}%`;
     el.progressBarFill.style.width = `${pct}%`;
-    el.statBytesCounter.innerText  = `${formatBytes(transferred)} / ${formatBytes(total)}`;
+    el.statBytesCounter.innerText = `${formatBytes(transferred)} / ${formatBytes(total)}`;
 }
 
 function startSpeedMetricsTracker() {
     state.speedTickInterval = setInterval(() => {
-        const now      = Date.now();
-        const deltaMs  = now - state.lastSpeedTickTime;
+        const now = Date.now();
+        const deltaMs = now - state.lastSpeedTickTime;
         const deltaBytes = state.bytesTransferred - state.lastLoggedBytes;
         if (deltaMs <= 0) return;
 
-        const speedBps  = deltaBytes / (deltaMs / 1000);
+        const speedBps = deltaBytes / (deltaMs / 1000);
         const speedMbps = speedBps / (1024 * 1024);
 
         state.speedHistory.push(speedMbps);
@@ -1160,7 +1167,7 @@ function startSpeedMetricsTracker() {
 
         drawSpeedHistoryChart();
 
-        state.lastLoggedBytes   = state.bytesTransferred;
+        state.lastLoggedBytes = state.bytesTransferred;
         state.lastSpeedTickTime = now;
     }, 1000);
 }
@@ -1173,8 +1180,8 @@ function stopSpeedMetricsTracker() {
 }
 
 function drawSpeedHistoryChart() {
-    const ctx    = el.canvas.getContext('2d');
-    const width  = el.canvas.width;
+    const ctx = el.canvas.getContext('2d');
+    const width = el.canvas.width;
     const height = el.canvas.height;
     ctx.clearRect(0, 0, width, height);
 
@@ -1187,8 +1194,8 @@ function drawSpeedHistoryChart() {
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
     }
 
-    const points  = state.speedHistory;
-    const maxVal  = Math.max(...points, 1);
+    const points = state.speedHistory;
+    const maxVal = Math.max(...points, 1);
     const padding = 10;
 
     const gradient = ctx.createLinearGradient(0, height - padding, 0, padding);
@@ -1197,21 +1204,21 @@ function drawSpeedHistoryChart() {
 
     ctx.beginPath();
     for (let i = 0; i < points.length; i++) {
-        const x        = (width / 59) * i;
+        const x = (width / 59) * i;
         const valRatio = points[i] / maxVal;
-        const y        = height - padding - (valRatio * (height - padding * 2));
+        const y = height - padding - (valRatio * (height - padding * 2));
         if (i === 0) {
             ctx.moveTo(x, y);
         } else {
             const prevX = (width / 59) * (i - 1);
-            const prevY = height - padding - (points[i-1] / maxVal * (height - padding * 2));
+            const prevY = height - padding - (points[i - 1] / maxVal * (height - padding * 2));
             ctx.bezierCurveTo((prevX + x) / 2, prevY, (prevX + x) / 2, y, x, y);
         }
     }
 
     ctx.strokeStyle = '#06b6d4';
-    ctx.lineWidth   = 2.5;
-    ctx.shadowBlur  = 4;
+    ctx.lineWidth = 2.5;
+    ctx.shadowBlur = 4;
     ctx.shadowColor = 'rgba(6, 182, 212, 0.5)';
     ctx.stroke();
 
@@ -1223,10 +1230,10 @@ function drawSpeedHistoryChart() {
 }
 
 function showSuccessScreen(durationMs, avgSpeedBytes) {
-    el.summaryFileName.innerText  = state.fileName;
-    el.summaryFileSize.innerText  = formatBytes(state.fileSize);
-    el.summaryAvgSpeed.innerText  = `${(avgSpeedBytes / (1024 * 1024)).toFixed(1)} MB/s`;
-    el.summaryDuration.innerText  = formatTime(Math.round(durationMs / 1000));
+    el.summaryFileName.innerText = state.fileName;
+    el.summaryFileSize.innerText = formatBytes(state.fileSize);
+    el.summaryAvgSpeed.innerText = `${(avgSpeedBytes / (1024 * 1024)).toFixed(1)} MB/s`;
+    el.summaryDuration.innerText = formatTime(Math.round(durationMs / 1000));
 
     el.completePanel.querySelector('#complete-subtext').innerText =
         state.role === 'sender'
@@ -1269,7 +1276,7 @@ function releaseWakeLock() {
 function startRelayKeepalive() {
     stopRelayKeepalive();
     state.relayKeepalive = setInterval(() => {
-        fetch('/ping').catch(() => {});
+        fetch('/ping').catch(() => { });
     }, 20000);
 }
 
@@ -1284,20 +1291,20 @@ function stopRelayKeepalive() {
 
 function formatBytes(bytes, decimals = 2) {
     if (bytes === 0) return '0 Bytes';
-    const k  = 1024;
+    const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i  = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
 function formatTime(seconds) {
     if (seconds === Infinity || isNaN(seconds)) return 'Calculating...';
-    if (seconds < 60)  return `${seconds}s`;
+    if (seconds < 60) return `${seconds}s`;
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     if (m < 60) return `${m}m ${s}s`;
-    const h  = Math.floor(m / 60);
+    const h = Math.floor(m / 60);
     const rm = m % 60;
     return `${h}h ${rm}m`;
 }

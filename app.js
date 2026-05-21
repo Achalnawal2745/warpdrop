@@ -396,7 +396,8 @@ function connectToSignalingServer() {
                     const forceHttpRelay = document.getElementById('force-http-relay-checkbox');
                     if (forceWsRelay && forceWsRelay.checked) {
                         logger("Force WS Relay mode.");
-                        initiateWsRelayFallback();
+                        // Small delay so receiver's onopen has time to fire first
+                        setTimeout(() => initiateWsRelayFallback(), 500);
                     } else if (forceHttpRelay && forceHttpRelay.checked) {
                         logger("Force HTTP Relay mode.");
                         initiateHttpRelayFallback();

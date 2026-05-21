@@ -51,7 +51,15 @@ const state = {
     wsKeepalive: null,
 
     // UI throttling
-    lastUiUpdateTime: 0
+    lastUiUpdateTime: 0,
+
+    // Resume / stall detection
+    stallDetectorInterval: null,   // setInterval handle
+    lastBytesAtStallCheck: 0,      // snapshot for stall comparison
+    stallStrikes: 0,               // consecutive stalled seconds counter
+    resumeOffset: 0,               // byte offset to resume from after reconnect
+    isResuming: false,             // true when reconnecting mid-transfer
+    webrtcHandshakeTimer: null     // fallback timer for P2P connection
 };
 
 // WebRTC constants
@@ -285,6 +293,7 @@ function resetToHome() {
     closePeerConnection();
     resetFileSelection();
     stopRelayKeepalive();
+    stopStallDetector();
 
     // FIX: clear wsKeepalive on reset (was leaking intervals)
     if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
@@ -294,7 +303,9 @@ function resetToHome() {
         receivedChunks: [], pendingWrites: [],
         bytesTransferred: 0, speedHistory: [], maxSpeedObserved: 0,
         useWsRelay: false, wsBufferPolling: false, wsRelayOffset: 0, wsChunksInFlight: 0, wsRelayRunning: false, useHttpRelay: false,
-        transferAborted: true, isSendingPaused: false, sendOffset: 0
+        transferAborted: true, isSendingPaused: false, sendOffset: 0,
+        stallStrikes: 0, lastBytesAtStallCheck: 0, resumeOffset: 0, isResuming: false,
+        webrtcHandshakeTimer: null
     });
 
     if (state.fileWritable) {
@@ -393,17 +404,39 @@ function connectToSignalingServer() {
             case 'peer-joined':
                 logger("Peer joined the room!");
                 if (state.role === 'sender') {
-                    const forceWsRelay = document.getElementById('force-ws-relay-checkbox');
-                    const forceHttpRelay = document.getElementById('force-http-relay-checkbox');
-                    if (forceWsRelay && forceWsRelay.checked) {
-                        logger("Force WS Relay mode.");
-                        initiateWsRelayFallback();
-                    } else if (forceHttpRelay && forceHttpRelay.checked) {
-                        logger("Force HTTP Relay mode.");
-                        initiateHttpRelayFallback();
+                    if (state.isResuming) {
+                        // Reconnected mid-transfer — skip WebRTC, go straight to WS relay resume
+                        logger(`Resuming WS relay from ${formatBytes(state.resumeOffset)}`);
+                        state.useWsRelay = true;
+                        sendSignalingMessage({
+                            type: 'ws-relay-start',
+                            name: state.fileName,
+                            size: state.fileSize,
+                            mime: state.fileType,
+                            resuming: true
+                        });
                     } else {
-                        el.waitingStatusText.innerText = "Peer joined. Handshaking WebRTC...";
-                        setupPeerConnection();
+                        const forceWsRelay = document.getElementById('force-ws-relay-checkbox');
+                        const forceHttpRelay = document.getElementById('force-http-relay-checkbox');
+                        if (forceWsRelay && forceWsRelay.checked) {
+                            logger("Force WS Relay mode.");
+                            initiateWsRelayFallback();
+                        } else if (forceHttpRelay && forceHttpRelay.checked) {
+                            logger("Force HTTP Relay mode.");
+                            initiateHttpRelayFallback();
+                        } else {
+                            el.waitingStatusText.innerText = "Peer joined. Handshaking WebRTC...";
+                            setupPeerConnection();
+                            
+                            // Timeout WebRTC if network blocks it (common on mobile data)
+                            if (state.webrtcHandshakeTimer) clearTimeout(state.webrtcHandshakeTimer);
+                            state.webrtcHandshakeTimer = setTimeout(() => {
+                                if (state.peerConnection && state.peerConnection.connectionState !== 'connected') {
+                                    logger("WebRTC handshake timeout (5s). Falling back to WS Relay.");
+                                    initiateWsRelayFallback();
+                                }
+                            }, 5000);
+                        }
                     }
                 }
                 break;
@@ -453,6 +486,17 @@ function connectToSignalingServer() {
             case 'ws-relay-ready':
                 logger("Receiver ready. Starting WS relay upload...");
                 if (state.role === 'sender') startWsRelayTransfer();
+                break;
+
+            case 'ws-relay-resume':
+                // Receiver tells sender what byte offset it already has
+                logger(`Receiver resuming from byte ${msg.offset}`);
+                if (state.role === 'sender' && state.isResuming) {
+                    state.wsRelayOffset    = msg.offset;
+                    state.bytesTransferred = msg.offset;
+                    state.resumeOffset     = msg.offset;
+                    startWsRelayTransfer();
+                }
                 break;
 
             case 'ws-relay-ack':
@@ -622,6 +666,10 @@ function setupDataChannelHandlers() {
 
     state.dataChannel.onopen = () => {
         logger("P2P Data Channel Open!");
+        if (state.webrtcHandshakeTimer) {
+            clearTimeout(state.webrtcHandshakeTimer);
+            state.webrtcHandshakeTimer = null;
+        }
         updateServerStatus('online', 'P2P Link Secured.');
         if (state.role === 'sender') {
             state.dataChannel.send(JSON.stringify({
@@ -760,6 +808,7 @@ async function acceptIncomingTransfer() {
 
     if (state.useWsRelay) {
         el.transferTitle.innerText = "Downloading File... (WS Relay)";
+        if (typeof startStallDetector === 'function') startStallDetector();
         sendSignalingMessage({ type: 'ws-relay-ready' });
     } else if (state.useHttpRelay) {
         el.transferTitle.innerText = "Downloading File... (HTTP Relay)";
@@ -1262,12 +1311,102 @@ function showSuccessScreen(durationMs, avgSpeedBytes) {
 
 function handlePeerDisconnection(reasonText) {
     stopSpeedMetricsTracker();
+    if (typeof stopStallDetector === 'function') stopStallDetector();
     releaseWakeLock();
     stopRelayKeepalive();
-    if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize) {
+
+    const midTransfer = state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize;
+
+    if (midTransfer && state.useWsRelay) {
+        // Save resume position and offer reconnect instead of hard reset
+        state.resumeOffset  = state.wsRelayOffset;
+        state.transferAborted = true;
+        state.wsRelayRunning  = false;
+
+        const pct = ((state.bytesTransferred / state.fileSize) * 100).toFixed(1);
+        const msg = `${reasonText}\n\nTransfer was at ${pct}% (${formatBytes(state.bytesTransferred)}).\n\nReconnect to resume from where it stopped?`;
+
+        if (confirm(msg)) {
+            // Keep file/metadata, just reconnect
+            state.isResuming   = true;
+            state.wsChunksInFlight = 0;
+            state.wsBufferPolling  = false;
+            el.waitingStatusText.innerText = `Reconnecting... (resume at ${pct}%)`;
+            showPanel(el.shareLinkPanel);
+            connectToSignalingServer(); // reconnect same roomID
+            updateServerStatus('connecting', `Reconnecting to resume at ${pct}%...`);
+        } else {
+            resetToHome();
+        }
+        return;
+    }
+
+    if (midTransfer) {
         alert(`${reasonText} Transfer interrupted at ${formatBytes(state.bytesTransferred)}.`);
     }
     resetToHome();
+}
+
+// ─── Stall Detector ──────────────────────────────────────────────────────────
+// Watches bytesTransferred every second. If it hasn't moved for 8 consecutive
+// seconds during an active WS relay, it kicks the pipeline by calling
+// streamNextWsChunk() — this recovers from the concurrency deadlock where
+// wsRelayRunning got stuck true without the loop actually running.
+
+function startStallDetector() {
+    stopStallDetector();
+    state.stallStrikes         = 0;
+    state.lastBytesAtStallCheck = state.bytesTransferred;
+
+    state.stallDetectorInterval = setInterval(() => {
+        if (state.transferAborted) { stopStallDetector(); return; }
+        if (!state.useWsRelay)     { stopStallDetector(); return; }
+
+        const currentBytes = state.bytesTransferred;
+        const isMoving     = currentBytes > state.lastBytesAtStallCheck;
+        state.lastBytesAtStallCheck = currentBytes;
+
+        if (isMoving) {
+            state.stallStrikes = 0;
+            return;
+        }
+
+        // If we are actively polling the buffer to drain, we are NOT stalled.
+        // We are just waiting for a slow network connection to send the data!
+        if (state.wsBufferPolling) {
+            state.stallStrikes = 0;
+            return;
+        }
+
+        // Not moving
+        state.stallStrikes++;
+        logger(`Stall detected (${state.stallStrikes}/8 strikes) at ${formatBytes(currentBytes)}`);
+
+        if (state.stallStrikes >= 8) {
+            state.stallStrikes = 0;
+
+            if (state.role === 'sender') {
+                // Kick the pipeline — release stuck lock and restart
+                logger("Stall recovery: kicking WS relay pipeline...");
+                state.wsRelayRunning   = false;
+                state.wsBufferPolling  = false;
+                state.wsChunksInFlight = 0;
+                streamNextWsChunk();
+            } else if (state.role === 'receiver') {
+                // Receiver side stall — re-send ACK to unblock sender
+                logger("Stall recovery: re-sending ACK to unblock sender...");
+                sendSignalingMessage({ type: 'ws-relay-ack' });
+            }
+        }
+    }, 1000);
+}
+
+function stopStallDetector() {
+    if (state.stallDetectorInterval) {
+        clearInterval(state.stallDetectorInterval);
+        state.stallDetectorInterval = null;
+    }
+    state.stallStrikes = 0;
 }
 
 // ─── Wake Lock ────────────────────────────────────────────────────────────────

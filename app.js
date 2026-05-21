@@ -385,7 +385,7 @@ function connectToSignalingServer() {
         if (event.data instanceof ArrayBuffer) {
             // FIX: guard against re-entry after transfer completes
             if (state.useWsRelay && state.role === 'receiver' && !state.transferAborted) {
-                await processIncomingChunk(event.data);
+                processIncomingChunk(event.data);
                 updateProgressPercentage(state.bytesTransferred, state.fileSize);
 
                 sendSignalingMessage({ type: 'ws-relay-ack' });
@@ -586,13 +586,19 @@ function connectToSignalingServer() {
         if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
         logger("Disconnected from signaling server.");
         if (state.transferAborted) return; // already handled (e.g. user chose not to resume)
-        if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize) {
+        // If WS relay is active and transfer is mid-flight, the transfer can't continue
+        // without the signaling WebSocket (ACKs travel over it)
+        if (state.useWsRelay && state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize) {
+            handlePeerDisconnection("WebSocket connection lost during relay transfer.");
+        } else if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize) {
             handlePeerDisconnection("Signaling server disconnected.");
         }
     };
 }
 
 function disconnectWebSocket() {
+    // FIX: clear wsKeepalive here too (was only cleared in resetToHome)
+    if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
     if (state.ws) {
         state.ws.onmessage = null;
         state.ws.onclose = null;
@@ -746,7 +752,7 @@ function setupDataChannelHandlers() {
                     break;
             }
         } else {
-            await processIncomingChunk(data);
+            processIncomingChunk(data);
         }
     };
 
@@ -907,16 +913,19 @@ async function resumeIncomingTransfer() {
     }
 }
 
-async function processIncomingChunk(arrayBuffer) {
+function processIncomingChunk(arrayBuffer) {
     try {
         if (state.fileWritable) {
-            try {
-                await state.fileWritable.write(arrayBuffer);
-            } catch (e) {
+            const writePromise = state.fileWritable.write(arrayBuffer).catch(e => {
                 console.error("Write error:", e);
                 handlePeerDisconnection("Local file write failed.");
-                return;
-            }
+            });
+            state.pendingWrites.push(writePromise);
+            // Self-cleanup: remove from array once settled
+            writePromise.finally(() => {
+                const idx = state.pendingWrites.indexOf(writePromise);
+                if (idx !== -1) state.pendingWrites.splice(idx, 1);
+            });
         } else {
             state.receivedChunks.push(arrayBuffer);
         }
@@ -937,7 +946,12 @@ async function completeIncomingTransfer() {
 
     if (state.fileWritable) {
         try {
-            await Promise.all(state.pendingWrites);
+            // Wait for ALL pending disk writes to flush before closing
+            if (state.pendingWrites.length > 0) {
+                logger(`Flushing ${state.pendingWrites.length} pending writes...`);
+                await Promise.allSettled(state.pendingWrites);
+                state.pendingWrites = [];
+            }
             await state.fileWritable.close();
             state.fileWritable = null;
             state.pendingWrites = [];

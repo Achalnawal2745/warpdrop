@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Response, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -25,7 +26,8 @@ class HTTPRelayManager:
                     "chunk": None,
                     "uploaded": asyncio.Event(),
                     "downloaded": asyncio.Event(),
-                    "active": True
+                    "active": True,
+                    "last_activity": time.time()
                 }
             return self.transfers[room_id]
 
@@ -40,12 +42,31 @@ class HTTPRelayManager:
 
 relay_manager = HTTPRelayManager()
 
+async def cleanup_stale_transfers():
+    """Background task: remove HTTP relay transfers inactive for 5+ minutes."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        async with relay_manager.lock:
+            stale = [rid for rid, t in relay_manager.transfers.items()
+                     if now - t.get("last_activity", now) > 300]
+            for rid in stale:
+                relay_manager.transfers[rid]["uploaded"].set()
+                relay_manager.transfers[rid]["downloaded"].set()
+                del relay_manager.transfers[rid]
+                logger.info(f"Cleaned up stale HTTP relay for room '{rid}'")
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(cleanup_stale_transfers())
+
 @app.post("/relay/upload/{room_id}")
 async def relay_upload(room_id: str, file: UploadFile = File(...)):
     relay = await relay_manager.get_or_create(room_id)
     content = await file.read()
     
     relay["chunk"] = content
+    relay["last_activity"] = time.time()
     relay["uploaded"].set()
     
     try:
@@ -69,6 +90,7 @@ async def relay_download(room_id: str):
     relay["uploaded"].clear()
     content = relay["chunk"]
     relay["chunk"] = None
+    relay["last_activity"] = time.time()
     
     relay["downloaded"].set()
     return Response(content=content, media_type="application/octet-stream")

@@ -473,6 +473,9 @@ function connectToSignalingServer() {
                         showPanel(el.progressPanel);
                         el.transferTitle.innerText = "Resuming Download... (WS Relay)";
                         if (typeof startStallDetector === 'function') startStallDetector();
+                        startSpeedMetricsTracker();
+                        requestWakeLock();
+                        startRelayKeepalive();
                         sendSignalingMessage({ type: 'ws-relay-resume', offset: state.bytesTransferred });
                     } else {
                         // Fresh transfer

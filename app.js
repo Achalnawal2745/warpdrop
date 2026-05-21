@@ -37,6 +37,7 @@ const state = {
     wsRelayOffset: 0,
     wsChunksInFlight: 0,       // Tracks how many blocks are currently on the wire
     maxWsChunksInFlight: 3,    // Allowed pipeline window depth (6MB in flight max)
+    wsRelayRunning: false,     // Guard: prevents concurrent streamNextWsChunk() calls
 
     // HTTP relay mode
     useHttpRelay: false,
@@ -292,7 +293,7 @@ function resetToHome() {
         role: null, roomID: null,
         receivedChunks: [], pendingWrites: [],
         bytesTransferred: 0, speedHistory: [], maxSpeedObserved: 0,
-        useWsRelay: false, wsBufferPolling: false, wsRelayOffset: 0, wsChunksInFlight: 0, useHttpRelay: false,
+        useWsRelay: false, wsBufferPolling: false, wsRelayOffset: 0, wsChunksInFlight: 0, wsRelayRunning: false, useHttpRelay: false,
         transferAborted: true, isSendingPaused: false, sendOffset: 0
     });
 
@@ -396,8 +397,7 @@ function connectToSignalingServer() {
                     const forceHttpRelay = document.getElementById('force-http-relay-checkbox');
                     if (forceWsRelay && forceWsRelay.checked) {
                         logger("Force WS Relay mode.");
-                        // Small delay so receiver's onopen has time to fire first
-                        setTimeout(() => initiateWsRelayFallback(), 500);
+                        initiateWsRelayFallback();
                     } else if (forceHttpRelay && forceHttpRelay.checked) {
                         logger("Force HTTP Relay mode.");
                         initiateHttpRelayFallback();
@@ -460,9 +460,9 @@ function connectToSignalingServer() {
                     state.wsChunksInFlight = Math.max(0, state.wsChunksInFlight - 1);
 
                     if (state.wsRelayOffset >= state.fileSize && state.wsChunksInFlight === 0) {
-                        // FIX: guard against double-fire of completeFileTransfer
                         if (!state.transferAborted) completeFileTransfer();
-                    } else if (!state.wsBufferPolling && state.wsRelayOffset < state.fileSize) {
+                    } else if (!state.wsBufferPolling && !state.wsRelayRunning && state.wsRelayOffset < state.fileSize) {
+                        // Only call if loop isn't already running — guard prevents double-pump
                         streamNextWsChunk();
                     }
                 }
@@ -865,6 +865,7 @@ function startWsRelayTransfer() {
     state.wsRelayOffset = 0;
     state.wsBufferPolling = false;
     state.wsChunksInFlight = 0;
+    state.wsRelayRunning = false;
     showPanel(el.progressPanel);
     updateProgressPercentage(0, state.fileSize, true);
     el.transferTitle.innerText = "Uploading File... (Relay)";
@@ -878,51 +879,66 @@ function startWsRelayTransfer() {
 async function streamNextWsChunk() {
     if (state.transferAborted) return;
 
-    while (state.wsChunksInFlight < state.maxWsChunksInFlight && state.wsRelayOffset < state.fileSize) {
+    // Guard: only one concurrent instance allowed.
+    // ACKs can call this while the loop is still awaiting arrayBuffer() —
+    // without this guard two concurrent loops both advance wsRelayOffset,
+    // chunks get skipped and the transfer corrupts then stalls.
+    if (state.wsRelayRunning) return;
+    state.wsRelayRunning = true;
 
-        if (state.ws && state.ws.bufferedAmount > 8 * 1024 * 1024) {
-            if (state.wsBufferPolling) return;
-            state.wsBufferPolling = true;
-            const wait = () => {
-                if (state.transferAborted) return;
-                if (state.ws.bufferedAmount < 2 * 1024 * 1024) {
-                    state.wsBufferPolling = false;
-                    streamNextWsChunk();
-                } else {
-                    setTimeout(wait, 50);
-                }
-            };
-            setTimeout(wait, 50);
-            return;
-        }
+    try {
+        while (state.wsChunksInFlight < state.maxWsChunksInFlight && state.wsRelayOffset < state.fileSize) {
+            if (state.transferAborted) return;
 
-        const currentStart = state.wsRelayOffset;
-        const end = Math.min(currentStart + WS_CHUNK_SIZE, state.fileSize);
-        const slice = state.file.slice(currentStart, end);
+            // Socket buffer safeguard — pause if browser buffer is backed up
+            if (state.ws && state.ws.bufferedAmount > 8 * 1024 * 1024) {
+                state.wsRelayRunning = false; // release lock while waiting
+                if (state.wsBufferPolling) return;
+                state.wsBufferPolling = true;
+                const wait = () => {
+                    if (state.transferAborted) return;
+                    if (state.ws.bufferedAmount < 2 * 1024 * 1024) {
+                        state.wsBufferPolling = false;
+                        streamNextWsChunk(); // re-enter with guard
+                    } else {
+                        setTimeout(wait, 50);
+                    }
+                };
+                setTimeout(wait, 50);
+                return;
+            }
 
-        state.wsRelayOffset = end; // advance offset before await to prevent re-read
+            const currentStart = state.wsRelayOffset;
+            const end = Math.min(currentStart + WS_CHUNK_SIZE, state.fileSize);
+            const slice = state.file.slice(currentStart, end);
 
-        try {
-            const buffer = await slice.arrayBuffer();
+            state.wsRelayOffset = end; // advance before await — safe because wsRelayRunning guards re-entry
+
+            let buffer;
+            try {
+                buffer = await slice.arrayBuffer();
+            } catch (e) {
+                console.error("File read error:", e);
+                handlePeerDisconnection("File read failed.");
+                return;
+            }
+
+            if (state.transferAborted) return;
 
             if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
                 handlePeerDisconnection("Connection dropped during relay.");
                 return;
             }
 
-            // FIX: increment AFTER read completes, not before — otherwise window
-            // fills with in-progress reads and starves actual network sends
             state.wsChunksInFlight++;
             state.ws.send(buffer);
 
             state.bytesTransferred = end;
             updateProgressPercentage(state.bytesTransferred, state.fileSize);
-
-        } catch (e) {
-            console.error("Pipelined WS send error:", e);
-            handlePeerDisconnection("Relay transmission failure.");
-            return;
         }
+    } finally {
+        // Always release the lock when the loop exits for any reason
+        state.wsRelayRunning = false;
     }
 }
 

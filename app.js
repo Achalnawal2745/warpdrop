@@ -458,17 +458,29 @@ function connectToSignalingServer() {
             case 'ws-relay-start':
                 logger("Received WS Relay start signal");
                 if (state.role === 'receiver') {
-                    state.fileName = msg.name;
-                    state.fileSize = msg.size;
-                    state.fileType = msg.mime;
                     state.useWsRelay = true;
 
-                    el.rxFileName.innerText = msg.name;
-                    el.rxFileSize.innerText = formatBytes(msg.size);
-                    el.rxFileIcon.className = `fa-regular ${getFileIcon(msg.name)} file-type-icon large`;
-                    el.btnAcceptTransfer.disabled = false;
-                    el.waitingStatusText.innerText = "P2P unavailable. Using WS relay. Click Accept.";
-                    showPanel(el.receiveConfirmPanel);
+                    if (msg.resuming && state.bytesTransferred > 0) {
+                        // Mid-transfer reconnect — tell sender our current byte position
+                        logger(`Resume path: already have ${formatBytes(state.bytesTransferred)}, sending offset back`);
+                        // Re-show progress panel (it was showing when we disconnected)
+                        showPanel(el.progressPanel);
+                        el.transferTitle.innerText = "Resuming Download... (WS Relay)";
+                        if (typeof startStallDetector === 'function') startStallDetector();
+                        sendSignalingMessage({ type: 'ws-relay-resume', offset: state.bytesTransferred });
+                    } else {
+                        // Fresh transfer
+                        state.fileName = msg.name;
+                        state.fileSize = msg.size;
+                        state.fileType = msg.mime;
+
+                        el.rxFileName.innerText = msg.name;
+                        el.rxFileSize.innerText = formatBytes(msg.size);
+                        el.rxFileIcon.className = `fa-regular ${getFileIcon(msg.name)} file-type-icon large`;
+                        el.btnAcceptTransfer.disabled = false;
+                        el.waitingStatusText.innerText = "P2P unavailable. Using WS relay. Click Accept.";
+                        showPanel(el.receiveConfirmPanel);
+                    }
                 }
                 break;
 
@@ -481,9 +493,9 @@ function connectToSignalingServer() {
                 // Receiver tells sender what byte offset it already has
                 logger(`Receiver resuming from byte ${msg.offset}`);
                 if (state.role === 'sender' && state.isResuming) {
-                    state.wsRelayOffset    = msg.offset;
+                    state.wsRelayOffset = msg.offset;
                     state.bytesTransferred = msg.offset;
-                    state.resumeOffset     = msg.offset;
+                    state.resumeOffset = msg.offset;
                     startWsRelayTransfer();
                 }
                 break;
@@ -553,7 +565,8 @@ function connectToSignalingServer() {
     state.ws.onclose = () => {
         if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
         logger("Disconnected from signaling server.");
-        if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize && !state.transferAborted) {
+        if (state.transferAborted) return; // already handled (e.g. user chose not to resume)
+        if (state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize) {
             handlePeerDisconnection("Signaling server disconnected.");
         }
     };
@@ -600,14 +613,29 @@ async function setupPeerConnection(incomingOffer = null) {
         } else if (s === 'disconnected') {
             state.disconnectTimer = setTimeout(() => {
                 if (state.peerConnection && state.peerConnection.connectionState !== 'connected') {
-                    if (!state.useWsRelay && !state.useHttpRelay) initiateWsRelayFallback();
-                    else handlePeerDisconnection("P2P connection lost.");
+                    if (!state.useWsRelay && !state.useHttpRelay) {
+                        initiateWsRelayFallback();
+                    } else {
+                        handlePeerDisconnection("P2P connection lost.");
+                    }
                 }
             }, 5000);
         } else if (s === 'failed') {
             if (state.disconnectTimer) { clearTimeout(state.disconnectTimer); state.disconnectTimer = null; }
-            if (!state.useWsRelay && !state.useHttpRelay) initiateWsRelayFallback();
-            else handlePeerDisconnection("Direct P2P connection failed.");
+            if (!state.useWsRelay && !state.useHttpRelay) {
+                // Both sides need to know — sender announces the switch via signaling.
+                // Receiver side: just close the dead PeerConnection and wait for ws-relay-start.
+                if (state.role === 'sender') {
+                    initiateWsRelayFallback();
+                } else {
+                    // Receiver: clean up dead PC, ws-relay-start signal will arrive from sender
+                    closePeerConnection();
+                    updateServerStatus('connecting', 'P2P failed. Waiting for relay fallback...');
+                    el.waitingStatusText && (el.waitingStatusText.innerText = 'P2P unavailable. Switching to relay...');
+                }
+            } else {
+                handlePeerDisconnection("Direct P2P connection failed.");
+            }
         }
     };
 
@@ -889,24 +917,31 @@ function initiateWsRelayFallback() {
             type: 'ws-relay-start',
             name: state.fileName,
             size: state.fileSize,
-            mime: state.fileType
+            mime: state.fileType,
+            resuming: state.isResuming
         });
     }
 }
 
 function startWsRelayTransfer() {
-    initTransferState();
-    state.wsRelayOffset = 0;
+    // On resume path, bytesTransferred & wsRelayOffset were already set by the ws-relay-resume handler.
+    // Only reset them for a fresh (non-resuming) transfer.
+    if (!state.isResuming) {
+        initTransferState();
+        state.wsRelayOffset = 0;
+    }
     state.wsBufferPolling = false;
     state.wsChunksInFlight = 0;
     state.wsRelayRunning = false;
     showPanel(el.progressPanel);
-    updateProgressPercentage(0, state.fileSize, true);
-    el.transferTitle.innerText = "Uploading File... (Relay)";
+    updateProgressPercentage(state.bytesTransferred, state.fileSize, !state.isResuming);
+    el.transferTitle.innerText = state.isResuming ? "Resuming Upload... (Relay)" : "Uploading File... (Relay)";
     el.transferDirectionBadge.innerHTML = '<i class="fa-solid fa-arrow-up"></i> Sending';
-    requestWakeLock();
+    if (!state.isResuming) requestWakeLock();
     startRelayKeepalive();
     startSpeedMetricsTracker();
+    if (typeof startStallDetector === 'function') startStallDetector();
+    state.isResuming = false; // clear flag — we're now live
     streamNextWsChunk();
 }
 
@@ -1303,21 +1338,30 @@ function handlePeerDisconnection(reasonText) {
     const midTransfer = state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize;
 
     if (midTransfer && state.useWsRelay) {
-        // Save resume position and offer reconnect instead of hard reset
-        state.resumeOffset  = state.wsRelayOffset;
+        // Save resume position — use bytesTransferred (what we actually confirmed)
+        // wsRelayOffset can be ahead of bytesTransferred if chunks were in-flight
+        state.resumeOffset = state.bytesTransferred;
+        state.wsRelayOffset = state.bytesTransferred; // align both to confirmed position
         state.transferAborted = true;
-        state.wsRelayRunning  = false;
+        state.wsRelayRunning = false;
 
         const pct = ((state.bytesTransferred / state.fileSize) * 100).toFixed(1);
         const msg = `${reasonText}\n\nTransfer was at ${pct}% (${formatBytes(state.bytesTransferred)}).\n\nReconnect to resume from where it stopped?`;
 
         if (confirm(msg)) {
             // Keep file/metadata, just reconnect
-            state.isResuming   = true;
+            state.isResuming = true;
+            state.transferAborted = false; // allow incoming chunks again after reconnect
             state.wsChunksInFlight = 0;
-            state.wsBufferPolling  = false;
-            el.waitingStatusText.innerText = `Reconnecting... (resume at ${pct}%)`;
-            showPanel(el.shareLinkPanel);
+            state.wsBufferPolling = false;
+
+            if (state.role === 'sender') {
+                el.waitingStatusText.innerText = `Reconnecting... (resume at ${pct}%)`;
+                showPanel(el.shareLinkPanel);
+            } else {
+                // Receiver: reconnect to same room, will receive ws-relay-start with resuming:true
+                updateServerStatus('connecting', `Reconnecting to resume at ${pct}%...`);
+            }
             connectToSignalingServer(); // reconnect same roomID
             updateServerStatus('connecting', `Reconnecting to resume at ${pct}%...`);
         } else {
@@ -1340,15 +1384,15 @@ function handlePeerDisconnection(reasonText) {
 
 function startStallDetector() {
     stopStallDetector();
-    state.stallStrikes         = 0;
+    state.stallStrikes = 0;
     state.lastBytesAtStallCheck = state.bytesTransferred;
 
     state.stallDetectorInterval = setInterval(() => {
         if (state.transferAborted) { stopStallDetector(); return; }
-        if (!state.useWsRelay)     { stopStallDetector(); return; }
+        if (!state.useWsRelay) { stopStallDetector(); return; }
 
         const currentBytes = state.bytesTransferred;
-        const isMoving     = currentBytes > state.lastBytesAtStallCheck;
+        const isMoving = currentBytes > state.lastBytesAtStallCheck;
         state.lastBytesAtStallCheck = currentBytes;
 
         if (isMoving) {
@@ -1366,8 +1410,8 @@ function startStallDetector() {
             if (state.role === 'sender') {
                 // Kick the pipeline — release stuck lock and restart
                 logger("Stall recovery: kicking WS relay pipeline...");
-                state.wsRelayRunning   = false;
-                state.wsBufferPolling  = false;
+                state.wsRelayRunning = false;
+                state.wsBufferPolling = false;
                 state.wsChunksInFlight = 0;
                 streamNextWsChunk();
             } else if (state.role === 'receiver') {

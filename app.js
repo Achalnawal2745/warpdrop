@@ -111,6 +111,7 @@ const el = {
     browserWarning: document.getElementById('browser-warning'),
     btnRejectTransfer: document.getElementById('btn-reject-transfer'),
     btnAcceptTransfer: document.getElementById('btn-accept-transfer'),
+    btnResumeTransfer: document.getElementById('btn-resume-transfer'),
 
     transferTitle: document.getElementById('transfer-title-text'),
     statProgress: document.getElementById('stat-progress'),
@@ -224,6 +225,11 @@ function setupEventListeners() {
     });
 
     el.btnAcceptTransfer.addEventListener('click', acceptIncomingTransfer);
+    
+    if (el.btnResumeTransfer) {
+        el.btnResumeTransfer.addEventListener('click', resumeIncomingTransfer);
+    }
+
     el.btnDone.addEventListener('click', resetToHome);
 
     el.btnCopyUrl.addEventListener('click', async () => {
@@ -478,7 +484,15 @@ function connectToSignalingServer() {
                         el.rxFileSize.innerText = formatBytes(msg.size);
                         el.rxFileIcon.className = `fa-regular ${getFileIcon(msg.name)} file-type-icon large`;
                         el.btnAcceptTransfer.disabled = false;
-                        el.waitingStatusText.innerText = "P2P unavailable. Using WS relay. Click Accept.";
+                        
+                        if ('showOpenFilePicker' in window && el.btnResumeTransfer) {
+                            el.btnResumeTransfer.style.display = 'inline-block';
+                            el.waitingStatusText.innerText = "Click Accept to download, or Resume if you already have part of this file.";
+                        } else {
+                            if (el.btnResumeTransfer) el.btnResumeTransfer.style.display = 'none';
+                            el.waitingStatusText.innerText = "P2P unavailable. Using WS relay. Click Accept.";
+                        }
+
                         showPanel(el.receiveConfirmPanel);
                     }
                 }
@@ -492,7 +506,13 @@ function connectToSignalingServer() {
             case 'ws-relay-resume':
                 // Receiver tells sender what byte offset it already has
                 logger(`Receiver resuming from byte ${msg.offset}`);
-                if (state.role === 'sender' && state.isResuming) {
+                if (state.role === 'sender') {
+                    // Force WS relay if not already
+                    if (!state.useWsRelay) {
+                        state.useWsRelay = true;
+                        closePeerConnection();
+                    }
+                    state.isResuming = true; // Pretend we are resuming
                     state.wsRelayOffset = msg.offset;
                     state.bytesTransferred = msg.offset;
                     state.resumeOffset = msg.offset;
@@ -830,6 +850,60 @@ async function acceptIncomingTransfer() {
     } else {
         el.transferTitle.innerText = "Downloading File... (P2P)";
         state.dataChannel.send(JSON.stringify({ type: 'ready' }));
+    }
+}
+
+async function resumeIncomingTransfer() {
+    if (!('showOpenFilePicker' in window)) return;
+    try {
+        const [fileHandle] = await window.showOpenFilePicker();
+        const file = await fileHandle.getFile();
+
+        if (file.size >= state.fileSize) {
+            alert("The file you selected is already complete or larger than the incoming file!");
+            return;
+        }
+
+        if (file.name !== state.fileName) {
+            if (!confirm(`The file you selected (${file.name}) has a different name than the incoming file (${state.fileName}). Are you sure you want to append to it?`)) {
+                return;
+            }
+        }
+
+        state.fileHandle = fileHandle;
+        state.fileWritable = await fileHandle.createWritable({ keepExistingData: true });
+        
+        // Fast-forward write head
+        await state.fileWritable.seek(file.size);
+        
+        state.pendingWrites = [];
+        state.bytesTransferred = file.size;
+
+        logger(`File System Writable Stream initialized for append. Size: ${file.size}`);
+
+        initTransferState();
+        state.bytesTransferred = file.size; // initTransferState resets it to 0, so set it again
+        
+        showPanel(el.progressPanel);
+        updateProgressPercentage(state.bytesTransferred, state.fileSize, true);
+        el.transferDirectionBadge.innerHTML = '<i class="fa-solid fa-arrow-down"></i> Receiving';
+
+        requestWakeLock();
+        startRelayKeepalive();
+        startSpeedMetricsTracker();
+
+        // Tell sender to skip ahead!
+        if (!state.useWsRelay) {
+            logger("Resuming requires WS Relay mode. Falling back...");
+            state.useWsRelay = true;
+        }
+        
+        el.transferTitle.innerText = "Resuming Download... (WS Relay)";
+        if (typeof startStallDetector === 'function') startStallDetector();
+        sendSignalingMessage({ type: 'ws-relay-resume', offset: state.bytesTransferred });
+
+    } catch (e) {
+        console.error("Resume file selection cancelled/failed:", e);
     }
 }
 

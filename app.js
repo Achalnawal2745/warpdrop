@@ -385,7 +385,7 @@ function connectToSignalingServer() {
         if (event.data instanceof ArrayBuffer) {
             // FIX: guard against re-entry after transfer completes
             if (state.useWsRelay && state.role === 'receiver' && !state.transferAborted) {
-                processIncomingChunk(event.data);
+                await processIncomingChunk(event.data);
                 updateProgressPercentage(state.bytesTransferred, state.fileSize);
 
                 sendSignalingMessage({ type: 'ws-relay-ack' });
@@ -907,21 +907,15 @@ async function resumeIncomingTransfer() {
     }
 }
 
-function processIncomingChunk(arrayBuffer) {
+async function processIncomingChunk(arrayBuffer) {
     try {
         if (state.fileWritable) {
-            const writePromise = state.fileWritable.write(arrayBuffer).catch(e => {
+            try {
+                await state.fileWritable.write(arrayBuffer);
+            } catch (e) {
                 console.error("Write error:", e);
                 handlePeerDisconnection("Local file write failed.");
-            });
-            state.pendingWrites.push(writePromise);
-
-            if (state.pendingWrites.length > 50) {
-                state.pendingWrites = state.pendingWrites.filter(p => {
-                    let settled = false;
-                    p.then(() => { settled = true; }).catch(() => { settled = true; });
-                    return !settled;
-                });
+                return;
             }
         } else {
             state.receivedChunks.push(arrayBuffer);

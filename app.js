@@ -58,8 +58,7 @@ const state = {
     lastBytesAtStallCheck: 0,      // snapshot for stall comparison
     stallStrikes: 0,               // consecutive stalled seconds counter
     resumeOffset: 0,               // byte offset to resume from after reconnect
-    isResuming: false,             // true when reconnecting mid-transfer
-    webrtcHandshakeTimer: null     // fallback timer for P2P connection
+    isResuming: false              // true when reconnecting mid-transfer
 };
 
 // WebRTC constants
@@ -304,8 +303,7 @@ function resetToHome() {
         bytesTransferred: 0, speedHistory: [], maxSpeedObserved: 0,
         useWsRelay: false, wsBufferPolling: false, wsRelayOffset: 0, wsChunksInFlight: 0, wsRelayRunning: false, useHttpRelay: false,
         transferAborted: true, isSendingPaused: false, sendOffset: 0,
-        stallStrikes: 0, lastBytesAtStallCheck: 0, resumeOffset: 0, isResuming: false,
-        webrtcHandshakeTimer: null
+        stallStrikes: 0, lastBytesAtStallCheck: 0, resumeOffset: 0, isResuming: false
     });
 
     if (state.fileWritable) {
@@ -427,15 +425,6 @@ function connectToSignalingServer() {
                         } else {
                             el.waitingStatusText.innerText = "Peer joined. Handshaking WebRTC...";
                             setupPeerConnection();
-                            
-                            // Timeout WebRTC if network blocks it (common on mobile data)
-                            if (state.webrtcHandshakeTimer) clearTimeout(state.webrtcHandshakeTimer);
-                            state.webrtcHandshakeTimer = setTimeout(() => {
-                                if (state.peerConnection && state.peerConnection.connectionState !== 'connected') {
-                                    logger("WebRTC handshake timeout (5s). Falling back to WS Relay.");
-                                    initiateWsRelayFallback();
-                                }
-                            }, 5000);
                         }
                     }
                 }
@@ -666,10 +655,6 @@ function setupDataChannelHandlers() {
 
     state.dataChannel.onopen = () => {
         logger("P2P Data Channel Open!");
-        if (state.webrtcHandshakeTimer) {
-            clearTimeout(state.webrtcHandshakeTimer);
-            state.webrtcHandshakeTimer = null;
-        }
         updateServerStatus('online', 'P2P Link Secured.');
         if (state.role === 'sender') {
             state.dataChannel.send(JSON.stringify({
@@ -1367,13 +1352,6 @@ function startStallDetector() {
         state.lastBytesAtStallCheck = currentBytes;
 
         if (isMoving) {
-            state.stallStrikes = 0;
-            return;
-        }
-
-        // If we are actively polling the buffer to drain, we are NOT stalled.
-        // We are just waiting for a slow network connection to send the data!
-        if (state.wsBufferPolling) {
             state.stallStrikes = 0;
             return;
         }

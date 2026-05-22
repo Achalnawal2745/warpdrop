@@ -19,8 +19,10 @@ const state = {
     pendingWrites: [],        // Track unresolved write promises
 
     // Transfer progress
-    bytesTransferred: 0,
+    bytesTransferred: 0,       // optimistic on sender (set on send); actual on receiver
+    confirmedBytes: 0,         // ACK-confirmed bytes (sender only) — safe for resume
     transferStartTime: 0,
+    resumeStartTime: 0,        // when the resumed portion started (for accurate avg speed)
     lastLoggedBytes: 0,
     lastSpeedTickTime: 0,
     speedHistory: [],
@@ -42,8 +44,9 @@ const state = {
     // HTTP relay mode
     useHttpRelay: false,
 
-    // Transfer abort flag
-    transferAborted: false,
+    // Transfer state flags
+    transferAborted: false,    // "don't process more chunks" guard
+    transferComplete: false,   // "transfer finished successfully" (split from transferAborted)
 
     // Wake Lock
     wakeLock: null,
@@ -58,7 +61,9 @@ const state = {
     lastBytesAtStallCheck: 0,      // snapshot for stall comparison
     stallStrikes: 0,               // consecutive stalled seconds counter
     resumeOffset: 0,               // byte offset to resume from after reconnect
-    isResuming: false              // true when reconnecting mid-transfer
+    isResuming: false,             // true when reconnecting mid-transfer
+    _receiverFinished: false,      // true when receiver confirmed file saved
+    _completionStats: null         // cached stats { durationMs, avgSpeedBytes } for success screen
 };
 
 // WebRTC constants
@@ -306,10 +311,13 @@ function resetToHome() {
     Object.assign(state, {
         role: null, roomID: null,
         receivedChunks: [], pendingWrites: [],
-        bytesTransferred: 0, speedHistory: [], maxSpeedObserved: 0,
+        bytesTransferred: 0, confirmedBytes: 0, speedHistory: [], maxSpeedObserved: 0,
         useWsRelay: false, wsBufferPolling: false, wsRelayOffset: 0, wsChunksInFlight: 0, wsRelayRunning: false, useHttpRelay: false,
-        transferAborted: true, isSendingPaused: false, sendOffset: 0,
-        stallStrikes: 0, lastBytesAtStallCheck: 0, resumeOffset: 0, isResuming: false
+        transferAborted: true, transferComplete: false, // transferAborted=true here acts as a
+        // "don't process stray chunks" guard during teardown, not a user-initiated abort.
+        isSendingPaused: false, sendOffset: 0,
+        stallStrikes: 0, lastBytesAtStallCheck: 0, resumeOffset: 0, isResuming: false, resumeStartTime: 0,
+        _receiverFinished: false, _completionStats: null
     });
 
     if (state.fileWritable) {
@@ -384,14 +392,14 @@ function connectToSignalingServer() {
         // ── Binary frame = file chunk in WS relay mode ──
         if (event.data instanceof ArrayBuffer) {
             // FIX: guard against re-entry after transfer completes
-            if (state.useWsRelay && state.role === 'receiver' && !state.transferAborted) {
+            if (state.useWsRelay && state.role === 'receiver' && !state.transferAborted && !state.transferComplete) {
                 processIncomingChunk(event.data);
                 updateProgressPercentage(state.bytesTransferred, state.fileSize);
 
                 sendSignalingMessage({ type: 'ws-relay-ack' });
 
                 if (state.bytesTransferred >= state.fileSize) {
-                    state.transferAborted = true; // prevent double-complete
+                    state.transferComplete = true; // prevent double-complete (separate from transferAborted)
                     await completeIncomingTransfer();
                 }
             }
@@ -406,6 +414,9 @@ function connectToSignalingServer() {
         switch (msg.type) {
 
             case 'peer-joined':
+                // NOTE: Server sends peer-joined to BOTH peers. Only the sender acts on it
+                // (initiating WebRTC or relay). The receiver ignores it — the offer/answer
+                // flow handles the receiver's side.
                 logger("Peer joined the room!");
                 if (state.role === 'sender') {
                     if (state.isResuming) {
@@ -526,12 +537,29 @@ function connectToSignalingServer() {
             case 'ws-relay-ack':
                 if (state.role === 'sender' && state.useWsRelay) {
                     state.wsChunksInFlight = Math.max(0, state.wsChunksInFlight - 1);
+                    // Track ACK-confirmed bytes: each ACK confirms one WS_CHUNK_SIZE chunk
+                    state.confirmedBytes = Math.min(
+                        state.confirmedBytes + WS_CHUNK_SIZE,
+                        state.fileSize
+                    );
 
                     if (state.wsRelayOffset >= state.fileSize && state.wsChunksInFlight === 0) {
-                        if (!state.transferAborted) completeFileTransfer();
+                        if (!state.transferAborted && !state.transferComplete) completeFileTransfer();
                     } else if (!state.wsBufferPolling && !state.wsRelayRunning && state.wsRelayOffset < state.fileSize) {
                         // Only call if loop isn't already running — guard prevents double-pump
                         streamNextWsChunk();
+                    }
+                }
+                break;
+
+            // Receiver signals it has finished writing the file to disk
+            case 'transfer-complete':
+                if (state.role === 'sender') {
+                    logger("Receiver confirmed file saved successfully.");
+                    // Sender can now safely show success screen
+                    state._receiverFinished = true;
+                    if (state.transferComplete && state._completionStats) {
+                        showSuccessScreen(state._completionStats.durationMs, state._completionStats.avgSpeedBytes);
                     }
                 }
                 break;
@@ -567,6 +595,11 @@ function connectToSignalingServer() {
             // FIX: peer-left was missing — transfer would just freeze silently
             case 'peer-left':
                 logger("Peer disconnected.");
+                if (state.transferComplete && state._completionStats && !state._receiverFinished) {
+                    logger("Peer disconnected after transfer complete. Showing success screen.");
+                    showSuccessScreen(state._completionStats.durationMs, state._completionStats.avgSpeedBytes);
+                    break;
+                }
                 if (!state.transferAborted) {
                     handlePeerDisconnection("The other peer disconnected.");
                 }
@@ -588,6 +621,11 @@ function connectToSignalingServer() {
     state.ws.onclose = () => {
         if (state.wsKeepalive) { clearInterval(state.wsKeepalive); state.wsKeepalive = null; }
         logger("Disconnected from signaling server.");
+        if (state.transferComplete && state._completionStats && !state._receiverFinished) {
+            logger("WebSocket closed after transfer complete. Showing success screen.");
+            showSuccessScreen(state._completionStats.durationMs, state._completionStats.avgSpeedBytes);
+            return;
+        }
         if (state.transferAborted) return; // already handled (e.g. user chose not to resume)
         // If WS relay is active and transfer is mid-flight, the transfer can't continue
         // without the signaling WebSocket (ACKs travel over it)
@@ -890,8 +928,8 @@ async function resumeIncomingTransfer() {
 
         logger(`File System Writable Stream initialized for append. Size: ${file.size}`);
 
-        initTransferState();
-        state.bytesTransferred = file.size; // initTransferState resets it to 0, so set it again
+        initTransferState(file.size);
+        state.bytesTransferred = file.size; // initTransferState accepts resumeFrom but we double-set for clarity
         
         showPanel(el.progressPanel);
         updateProgressPercentage(state.bytesTransferred, state.fileSize, true);
@@ -941,16 +979,20 @@ function processIncomingChunk(arrayBuffer) {
 
 async function completeIncomingTransfer() {
     stopSpeedMetricsTracker();
+    stopStallDetector();  // FIX: was missing on receiver side too
     releaseWakeLock();
     stopRelayKeepalive();
 
-    const durationMs = Date.now() - state.transferStartTime;
-    const avgSpeedBytes = state.bytesTransferred / (durationMs / 1000);
+    // Use session-accurate timing if we resumed mid-transfer
+    const startTime = state.resumeStartTime || state.transferStartTime;
+    const durationMs = Date.now() - startTime;
+    const bytesThisSession = state.bytesTransferred - (state.resumeOffset || 0);
+    const avgSpeedBytes = bytesThisSession / (durationMs / 1000);
 
     if (state.fileWritable) {
         try {
             // Wait for ALL pending disk writes to flush before closing
-            if (state.pendingWrites.length > 0) {
+            if (state.pendingWrites && state.pendingWrites.length > 0) {
                 logger(`Flushing ${state.pendingWrites.length} pending writes...`);
                 await Promise.allSettled(state.pendingWrites);
                 state.pendingWrites = [];
@@ -959,6 +1001,9 @@ async function completeIncomingTransfer() {
             state.fileWritable = null;
             state.pendingWrites = [];
             logger("File saved and stream closed.");
+            // Signal sender that receiver finished writing — prevents sender from
+            // showing success before receiver's slow disk has flushed
+            sendSignalingMessage({ type: 'transfer-complete' });
         } catch (e) {
             console.error("Error closing writable stream:", e);
         }
@@ -1215,10 +1260,12 @@ async function startHttpDownloadLoop() {
     const downloadQueue = [];
     const MAX_DOWNLOAD_QUEUE = 2;
 
-    function fillDownloadQueue() {
-        let currentFetchingOffset = state.bytesTransferred + (downloadQueue.length * 4 * 1024 * 1024);
+    // FIX #4: use a dedicated counter for in-flight fetch offset instead of fragile
+    // downloadQueue.length * chunkSize calculation that drifts on retries/refills.
+    let httpFetchOffset = state.bytesTransferred;
 
-        while (downloadQueue.length < MAX_DOWNLOAD_QUEUE && currentFetchingOffset < state.fileSize && !state.transferAborted) {
+    function fillDownloadQueue() {
+        while (downloadQueue.length < MAX_DOWNLOAD_QUEUE && httpFetchOffset < state.fileSize && !state.transferAborted) {
             const fetchPromise = fetch(`/relay/download/${state.roomID}`).then(async (response) => {
                 if (response.status === 408) return { status: 408 };
                 if (!response.ok) throw new Error(`Server returned HTTP ${response.status}`);
@@ -1229,7 +1276,7 @@ async function startHttpDownloadLoop() {
             });
 
             downloadQueue.push(fetchPromise);
-            currentFetchingOffset += 4 * 1024 * 1024;
+            httpFetchOffset += 4 * 1024 * 1024; // advance fetch head
         }
     }
 
@@ -1277,27 +1324,41 @@ async function startHttpDownloadLoop() {
 function completeFileTransfer() {
     updateProgressPercentage(state.fileSize, state.fileSize, true);
     stopSpeedMetricsTracker();
+    stopStallDetector();  // FIX #5: was missing — stall detector kept running after completion
     releaseWakeLock();
     stopRelayKeepalive();
+    state.transferComplete = true;
 
-    const durationMs = Date.now() - state.transferStartTime;
-    const avgSpeedBytes = state.bytesTransferred / (durationMs / 1000);
-    showSuccessScreen(durationMs, avgSpeedBytes);
+    // Use resumeStartTime if we resumed mid-transfer, so avg speed reflects the session
+    const startTime = state.resumeStartTime || state.transferStartTime;
+    const durationMs = Date.now() - startTime;
+    const bytesThisSession = state.bytesTransferred - (state.resumeOffset || 0);
+    const avgSpeedBytes = bytesThisSession / (durationMs / 1000);
+    
+    state._completionStats = { durationMs, avgSpeedBytes };
+    if (state._receiverFinished) {
+        showSuccessScreen(durationMs, avgSpeedBytes);
+    }
 }
 
 // ─── Progress & Stats UI ──────────────────────────────────────────────────────
 
-function initTransferState() {
-    state.bytesTransferred = 0;
+function initTransferState(resumeFrom = 0) {
+    state.bytesTransferred = resumeFrom;
+    state.confirmedBytes = resumeFrom;
     state.sendOffset = 0;
     state.isSendingPaused = false;
     state.transferStartTime = Date.now();
-    state.lastLoggedBytes = 0;
+    state.resumeStartTime = resumeFrom > 0 ? Date.now() : 0;
+    state.lastLoggedBytes = resumeFrom;
     state.lastSpeedTickTime = Date.now();
     state.speedHistory = [];
     state.maxSpeedObserved = 0;
     state.lastUiUpdateTime = 0;
     state.transferAborted = false;
+    state.transferComplete = false;
+    state._receiverFinished = false;
+    state._completionStats = null;
 }
 
 function updateProgressPercentage(transferred, total, force = false) {
@@ -1312,6 +1373,7 @@ function updateProgressPercentage(transferred, total, force = false) {
 }
 
 function startSpeedMetricsTracker() {
+    stopSpeedMetricsTracker(); // FIX #9: always clear first — prevents double intervals on resume
     state.speedTickInterval = setInterval(() => {
         const now = Date.now();
         const deltaMs = now - state.lastSpeedTickTime;
@@ -1423,10 +1485,12 @@ function handlePeerDisconnection(reasonText) {
     const midTransfer = state.bytesTransferred > 0 && state.bytesTransferred < state.fileSize;
 
     if (midTransfer && state.useWsRelay) {
-        // Save resume position — use bytesTransferred (what we actually confirmed)
-        // wsRelayOffset can be ahead of bytesTransferred if chunks were in-flight
-        state.resumeOffset = state.bytesTransferred;
-        state.wsRelayOffset = state.bytesTransferred; // align both to confirmed position
+        // FIX #1: Use confirmedBytes (ACK-verified) for resume, not bytesTransferred
+        // (which is optimistic on the sender — set on send, before receiver confirms)
+        const safeOffset = state.role === 'sender' ? state.confirmedBytes : state.bytesTransferred;
+        state.resumeOffset = safeOffset;
+        state.bytesTransferred = safeOffset; // align display to confirmed position
+        state.wsRelayOffset = safeOffset;
         state.transferAborted = true;
         state.wsRelayRunning = false;
 
@@ -1557,7 +1621,7 @@ function stopRelayKeepalive() {
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
+    if (bytes <= 0) return '0 Bytes'; // FIX #11: guard against negative values (NaN from Math.log)
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];

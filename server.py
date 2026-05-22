@@ -56,9 +56,29 @@ async def cleanup_stale_transfers():
                 del relay_manager.transfers[rid]
                 logger.info(f"Cleaned up stale HTTP relay for room '{rid}'")
 
+async def cleanup_stale_rooms():
+    """Background task: evict WS rooms with a single occupant for 10+ minutes.
+    Handles cases where a client crashes without a clean WebSocketDisconnect."""
+    while True:
+        await asyncio.sleep(120)
+        now = time.time()
+        stale = [rid for rid, ts in list(room_timestamps.items())
+                 if rid in rooms and len(rooms[rid]) <= 1 and now - ts > 600]
+        for rid in stale:
+            # Close any lingering connections
+            for client in list(rooms.get(rid, set())):
+                try:
+                    await client.close(code=4002, reason="Room timed out.")
+                except Exception:
+                    pass
+            rooms.pop(rid, None)
+            room_timestamps.pop(rid, None)
+            logger.info(f"Evicted stale room '{rid}' (single occupant timeout)")
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(cleanup_stale_transfers())
+    asyncio.create_task(cleanup_stale_rooms())
 
 @app.post("/relay/upload/{room_id}")
 async def relay_upload(room_id: str, file: UploadFile = File(...)):
@@ -104,6 +124,7 @@ async def relay_cleanup(room_id: str):
 # Store active rooms and their clients
 # Format: { room_id: set(WebSocket) }
 rooms = {}
+room_timestamps = {}  # { room_id: time.time() } — tracks when rooms were created/last had 2 peers
 
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
@@ -112,6 +133,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     # Initialize room if it doesn't exist
     if room_id not in rooms:
         rooms[room_id] = set()
+        room_timestamps[room_id] = time.time()
         
     # WarpDrop rooms are strictly peer-to-peer (max 2 participants)
     if len(rooms[room_id]) >= 2:
@@ -125,6 +147,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
     # Notify existing peer that a new peer has joined
     if peer_count == 2:
+        room_timestamps[room_id] = time.time()  # reset timer when room is full
         for client in rooms[room_id]:
             try:
                 await client.send_json({"type": "peer-joined"})
@@ -165,6 +188,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             else:
                 # If room is empty, delete it
                 del rooms[room_id]
+                room_timestamps.pop(room_id, None)
                 logger.info(f"Room '{room_id}' is empty and has been deleted.")
 
 # Mount the static files
